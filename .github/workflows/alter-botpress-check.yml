@@ -1,0 +1,49 @@
+name: ALTER Botpress Check
+
+on:
+  pull_request:
+    paths:
+      - 'ALTER/botpress/**'
+      - '.github/workflows/alter-botpress-check.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'ALTER/botpress/**'
+      - '.github/workflows/alter-botpress-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ALTER/botpress
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2.21'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: ADK offline structure check
+        run: npx adk check
+
+      # Full adk build resolves live Botpress interfaces and therefore
+      # requires authentication. It runs in the guarded deploy workflow
+      # after BOTPRESS_PAT has been supplied through GitHub Actions Secrets.
