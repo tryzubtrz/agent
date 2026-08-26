@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -18,13 +18,14 @@ from .orchestrator import (
 from .persistence import (
     PostgresApprovalStore,
     PostgresAuditStore,
+    PostgresConnectorStore,
     PostgresMemoryStore,
     PostgresPolicyStore,
     PostgresTaskStore,
 )
 from .policy_store import InMemoryPolicyStore
 
-app = FastAPI(title="ALTER Core", version="0.3.0")
+app = FastAPI(title="ALTER Core", version="0.4.0")
 
 _database_url = os.getenv("DATABASE_URL")
 if _database_url:
@@ -33,6 +34,7 @@ if _database_url:
     approval_store: PostgresApprovalStore | None = PostgresApprovalStore(_database_url)
     audit_store: PostgresAuditStore | None = PostgresAuditStore(_database_url)
     memory_store: PostgresMemoryStore | None = PostgresMemoryStore(_database_url)
+    connector_store: PostgresConnectorStore | None = PostgresConnectorStore(_database_url)
     STORAGE_MODE = "postgres"
 else:
     task_store = InMemoryTaskStore()
@@ -40,10 +42,12 @@ else:
     approval_store = None
     audit_store = None
     memory_store = None
+    connector_store = None
     STORAGE_MODE = "memory"
 
 orchestrator = TaskOrchestrator(store=task_store)
 _memory_fallback: dict[tuple[UUID, UUID, str, str], Any] = {}
+_connector_fallback: dict[tuple[UUID, str], dict[str, Any]] = {}
 
 
 class CreateTaskBody(BaseModel):
@@ -72,13 +76,29 @@ class MemoryUpsertBody(BaseModel):
     value: Any
 
 
+ConnectorStatus = Literal[
+    "available",
+    "connected",
+    "degraded",
+    "blocked",
+    "not_configured",
+    "unavailable",
+]
+
+
+class ConnectorStateBody(BaseModel):
+    status: ConnectorStatus
+    capabilities: list[str] = Field(default_factory=list, max_length=100)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 @app.get("/health")
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {
         "service": "alter-core",
         "status": "ok",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "storage": STORAGE_MODE,
     }
 
@@ -240,6 +260,68 @@ def upsert_memory(
         principal,
         event_type="memory.upserted",
         payload={"namespace": body.namespace, "key": body.key},
+    )
+    return saved
+
+
+@app.get("/audit")
+@app.get("/api/audit")
+def list_audit_events(
+    limit: int = Query(default=100, ge=1, le=250),
+    principal: Principal = Depends(require_owner),
+) -> list[dict[str, Any]]:
+    if audit_store is None:
+        return []
+    return audit_store.list_for_workspace(principal.workspace_id, limit=limit)
+
+
+@app.get("/connectors")
+@app.get("/api/connectors")
+def list_connectors(
+    principal: Principal = Depends(require_owner),
+) -> list[dict[str, Any]]:
+    if connector_store is not None:
+        return connector_store.list_for_workspace(principal.workspace_id)
+    return [
+        item
+        for (workspace_id, _), item in _connector_fallback.items()
+        if workspace_id == principal.workspace_id
+    ]
+
+
+@app.put("/connectors/{connector_key}")
+@app.put("/api/connectors/{connector_key}")
+def upsert_connector(
+    connector_key: str,
+    body: ConnectorStateBody,
+    principal: Principal = Depends(require_owner),
+) -> dict[str, Any]:
+    normalized_key = connector_key.strip().lower()
+    if not normalized_key or len(normalized_key) > 120:
+        raise HTTPException(status_code=422, detail="Invalid connector key")
+
+    if connector_store is not None:
+        saved = connector_store.upsert(
+            workspace_id=principal.workspace_id,
+            connector_key=normalized_key,
+            status=body.status,
+            capabilities=body.capabilities,
+            details=body.details,
+        )
+    else:
+        saved = {
+            "workspace_id": str(principal.workspace_id),
+            "connector_key": normalized_key,
+            "status": body.status,
+            "capabilities": body.capabilities,
+            "details": body.details,
+        }
+        _connector_fallback[(principal.workspace_id, normalized_key)] = saved
+
+    _audit(
+        principal,
+        event_type="connector.checked",
+        payload={"connector_key": normalized_key, "status": body.status},
     )
     return saved
 
