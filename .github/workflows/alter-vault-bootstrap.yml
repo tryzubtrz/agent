@@ -1,0 +1,135 @@
+name: ALTER Vault Bootstrap
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/alter-vault-bootstrap.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: alter-vault-bootstrap
+  cancel-in-progress: true
+
+env:
+  ALTER_CORE_URL: https://alter-app-vadym-tokaryk.vercel.app
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Verify source credential exists
+        env:
+          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+        run: |
+          if [ -z "$BOTPRESS_PAT" ]; then
+            echo "BOTPRESS_PAT is not configured; vault bootstrap cannot continue."
+            exit 3
+          fi
+
+      - name: Transfer credential with GitHub OIDC
+        env:
+          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          from urllib.error import HTTPError, URLError
+          from urllib.request import Request, urlopen
+
+          oidc_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=alter-vault-bootstrap"
+          oidc_req = Request(
+              oidc_url,
+              headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+              method="GET",
+          )
+          with urlopen(oidc_req, timeout=15) as response:
+              oidc_token = json.loads(response.read().decode("utf-8"))["value"]
+
+          payload = json.dumps(
+              {
+                  "alias": "vault:botpress_runtime",
+                  "secret": os.environ["BOTPRESS_PAT"],
+              }
+          ).encode("utf-8")
+          endpoint = os.environ["ALTER_CORE_URL"].rstrip("/") + "/api/vault/bootstrap/github"
+
+          for attempt in range(1, 31):
+              request = Request(
+                  endpoint,
+                  data=payload,
+                  headers={
+                      "Authorization": "Bearer " + oidc_token,
+                      "Accept": "application/json",
+                      "Content-Type": "application/json",
+                  },
+                  method="POST",
+              )
+              try:
+                  with urlopen(request, timeout=20) as response:
+                      body = json.loads(response.read().decode("utf-8"))
+                      if response.status == 200 and body.get("configured") is True:
+                          print("ALTER encrypted runtime vault bootstrap succeeded; no secret value was printed.")
+                          raise SystemExit(0)
+                      raise RuntimeError("Unexpected vault bootstrap response.")
+              except HTTPError as exc:
+                  if exc.code in {404, 502, 503} and attempt < 30:
+                      print(f"ALTER Core not ready for bootstrap yet (HTTP {exc.code}); retry {attempt}/30.")
+                      time.sleep(5)
+                      continue
+                  print(f"ALTER vault bootstrap failed with HTTP {exc.code}; response body suppressed.")
+                  raise SystemExit(1)
+              except (URLError, TimeoutError):
+                  if attempt < 30:
+                      print(f"ALTER Core temporarily unreachable; retry {attempt}/30.")
+                      time.sleep(5)
+                      continue
+                  raise
+
+          raise SystemExit(1)
+          PY
+
+      - name: Smoke test runtime action with original GitHub secret
+        env:
+          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+          BOTPRESS_BOT_ID: 64f3490a-183a-47c5-b825-97210771822f
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from urllib.request import Request, urlopen
+
+          payload = json.dumps(
+              {
+                  "type": "alterThink",
+                  "input": {
+                      "objective": "Return a short Ukrainian readiness acknowledgement for an automated smoke test.",
+                      "context": "No external actions. No secrets. Smoke test only.",
+                      "mode": "normal",
+                  },
+              }
+          ).encode("utf-8")
+          request = Request(
+              "https://api.botpress.cloud/v1/chat/actions",
+              data=payload,
+              headers={
+                  "Authorization": "Bearer " + os.environ["BOTPRESS_PAT"],
+                  "x-bot-id": os.environ["BOTPRESS_BOT_ID"],
+                  "Accept": "application/json",
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+          with urlopen(request, timeout=30) as response:
+              body = json.loads(response.read().decode("utf-8"))
+          if not isinstance(body.get("output"), dict):
+              raise SystemExit("Botpress alterThink smoke test returned an invalid response.")
+          print("Botpress alterThink smoke test succeeded; response content suppressed.")
+          PY
