@@ -1,162 +1,118 @@
 "use client";
 
 import {
-  Activity,
   AlertTriangle,
-  AppWindow,
-  Archive,
   Bell,
   Bot,
   Brain,
-  Check,
   CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
-  CircleDollarSign,
-  CirclePause,
-  Cloud,
-  Code2,
   Database,
-  Eye,
-  File,
-  Files,
-  Filter,
   Folder,
   Globe2,
-  HardDrive,
-  History,
-  Home,
   KeyRound,
-  Layers3,
   Link2,
   ListChecks,
-  Lock,
   MemoryStick,
-  MessageCircle,
-  Mic,
-  Monitor,
-  MoreVertical,
-  Pause,
-  Play,
-  Plug,
   Plus,
-  Search,
   Send,
-  Settings,
   Shield,
   ShieldCheck,
   Smartphone,
-  Sparkles,
-  SquareTerminal,
-  Store,
-  Trash2,
-  UserPlus,
   Users,
-  WandSparkles,
-  Wifi
+  Wifi,
 } from "lucide-react";
-import { type ComponentType, type FormEvent, useMemo, useState } from "react";
+import { type ComponentType, type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
-type Screen =
-  | "home"
-  | "tasks"
-  | "browser"
-  | "connectors"
-  | "models"
-  | "vault"
-  | "rules"
-  | "people"
-  | "android"
-  | "files";
+type Screen = "home" | "tasks" | "rules" | "memory" | "connectors" | "browser" | "android" | "models" | "vault" | "people" | "files";
+type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
+type TaskStatus = "intake" | "planning" | "ready" | "executing" | "awaiting_approval" | "awaiting_login" | "awaiting_mfa" | "blocked_by_rule" | "recovering" | "paused" | "done" | "failed";
 
-type NavItem = { id: Screen; label: string; icon: ComponentType<{ size?: number; strokeWidth?: number }> };
+type Task = {
+  id: string;
+  objective: string;
+  status: TaskStatus;
+  acceptance_criteria: string[];
+  current_step: string | null;
+  blocker: string | null;
+  updated_at: string;
+  created_at: string;
+};
 
-const modules: NavItem[] = [
+type PolicyRule = {
+  id: string;
+  original_text: string;
+  category: string;
+  effect: "allow" | "deny" | "require_approval";
+  enabled: boolean;
+  priority: number;
+};
+
+type MemoryItem = {
+  id?: string;
+  namespace: string;
+  key: string;
+  value: unknown;
+  updated_at?: string;
+};
+
+type Health = { service: string; status: string; version: string; storage: string };
+
+type Module = { id: Screen; label: string; icon: Icon };
+
+const modules: Module[] = [
   { id: "home", label: "ALTER", icon: Bot },
+  { id: "tasks", label: "Задачі", icon: ListChecks },
+  { id: "memory", label: "Памʼять", icon: MemoryStick },
+  { id: "rules", label: "Правила", icon: ShieldCheck },
+  { id: "connectors", label: "Конектори", icon: Link2 },
   { id: "files", label: "Файли", icon: Folder },
   { id: "browser", label: "Браузер", icon: Globe2 },
   { id: "models", label: "Моделі", icon: Brain },
   { id: "android", label: "Android", icon: Smartphone },
-  { id: "rules", label: "Правила", icon: ShieldCheck },
   { id: "vault", label: "Сховище", icon: KeyRound },
-  { id: "tasks", label: "Задачі", icon: ListChecks },
-  { id: "connectors", label: "Конектори", icon: Plug },
-  { id: "people", label: "Люди", icon: Users }
+  { id: "people", label: "Люди", icon: Users },
 ];
 
-const bottomNav: NavItem[] = [
-  { id: "home", label: "ALTER", icon: Home },
-  { id: "tasks", label: "Задачі", icon: ListChecks },
-  { id: "connectors", label: "Конектори", icon: Link2 },
-  { id: "vault", label: "Сховище", icon: Lock },
-  { id: "rules", label: "Правила", icon: Shield }
-];
+const statusLabel: Record<TaskStatus, string> = {
+  intake: "Прийнято",
+  planning: "Планування",
+  ready: "Готова",
+  executing: "Виконується",
+  awaiting_approval: "Чекає схвалення",
+  awaiting_login: "Потрібен вхід",
+  awaiting_mfa: "Потрібна 2FA",
+  blocked_by_rule: "Заблоковано правилом",
+  recovering: "Відновлення",
+  paused: "Пауза",
+  done: "Готово",
+  failed: "Помилка",
+};
 
-const taskColumns = [
-  {
-    title: "Заплановано",
-    count: 3,
-    tasks: [
-      ["Публікація 30-секундного відео", "Сьогодні 20:00", "Високий"],
-      ["Оновити опис і хештеги для відео", "Завтра 10:00", "Середній"],
-      ["Тест моделі VideoGen v2", "12 хв тому", "Низький"]
-    ]
-  },
-  {
-    title: "Виконується",
-    count: 2,
-    tasks: [
-      ["Оцінка погодження опису і хештегів", "2 хв тому", "Високий"],
-      ["Задача «Збір референсів» виконана", "28 хв тому", "Середній"]
-    ]
-  },
-  {
-    title: "Чекає на мене",
-    count: 1,
-    tasks: [["Погодити опис і хештеги", "Сьогодні 18:00", "Високий"]]
+async function core<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`/api/core${path}`, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      ...(init?.headers || {}),
+    },
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `ALTER Core returned ${response.status}`);
   }
-];
-
-const connectors = [
-  ["Google Drive", "читання · файли", "GD"],
-  ["Notion", "читання · чернетки", "N"],
-  ["YouTube", "читання · публікація", "YT"],
-  ["Binance", "читання · торгівля", "BN"]
-];
-
-const models = [
-  ["VideoGen V2", "92", "1.8 c", "$0.012", "ДОВІРЕНА"],
-  ["CodeCraft 4.1", "89", "2.3 c", "$0.008", "ДОВІРЕНА"],
-  ["VisionPro 1.3", "76", "2.9 c", "$0.010", "НА ПЕРЕВІРЦІ"]
-];
-
-const secrets = [
-  ["aws-prod-readonly", "Хмарний сервіс", "Read-only", "2 хв тому"],
-  ["pg-analytics", "База даних", "Read-write", "7 хв тому"],
-  ["github-actions-bot", "Інтеграція", "Write", "12 хв тому"]
-];
-
-const rules = [
-  ["Не відкривай TikTok", true, "Робочий час"],
-  ["Не публікуй без чернетки", true, "Завжди"],
-  ["Не витрачай більше $10 на одну задачу", true, "Завжди"],
-  ["Не читай робочу пошту", false, "Завжди"]
-] as const;
+  return response.json() as Promise<T>;
+}
 
 function Logo() {
   return <div className="alterLogo" aria-label="ALTER">A</div>;
 }
 
-function Header({ title, back, onBack }: { title?: string; back?: boolean; onBack?: () => void }) {
+function Header({ title }: { title?: string }) {
   return (
     <header className="appHeader">
       <div className="brandWord">ALTER</div>
-      {title ? (
-        <div className="screenTitleCompact">
-          {back && <button className="iconButton ghost" onClick={onBack}><ChevronLeft size={20} /></button>}
-          <span>{title}</span>
-        </div>
-      ) : <Logo />}
+      {title ? <div className="screenTitleCompact"><span>{title}</span></div> : <Logo />}
       <button className="iconButton notification" aria-label="Сповіщення"><Bell size={19} /><i /></button>
     </header>
   );
@@ -166,237 +122,281 @@ function StatusChip({ children, tone = "green" }: { children: React.ReactNode; t
   return <span className={`statusChip ${tone}`}><i />{children}</span>;
 }
 
-function BottomNav({ screen, setScreen }: { screen: Screen; setScreen: (screen: Screen) => void }) {
+function HonestPlaceholder({ title, icon: Icon, text }: { title: string; icon: Icon; text: string }) {
   return (
-    <nav className="bottomNav" aria-label="Основна навігація">
-      {bottomNav.map(({ id, label, icon: Icon }) => (
-        <button key={id} className={screen === id ? "active" : ""} onClick={() => setScreen(id)}>
-          <Icon size={20} strokeWidth={1.7} />
-          <span>{label}</span>
-          {id === "tasks" && <b>3</b>}
-        </button>
-      ))}
-    </nav>
+    <section className="glassPanel" style={{ borderRadius: 22, padding: 20 }}>
+      <div style={{ display: "flex", gap: 13, alignItems: "center" }}>
+        <div className="iconButton"><Icon size={20} /></div>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 22 }}>{title}</h2>
+          <p style={{ color: "var(--muted)", margin: "6px 0 0", lineHeight: 1.5 }}>{text}</p>
+        </div>
+      </div>
+      <div style={{ marginTop: 16 }}><StatusChip tone="amber">Ще не підключено до runtime</StatusChip></div>
+    </section>
   );
 }
 
-function HomeScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
-  const [text, setText] = useState("");
-  const [messages, setMessages] = useState<string[]>([]);
-  function send(e: FormEvent) {
-    e.preventDefault();
-    if (!text.trim()) return;
-    setMessages((items) => [...items, text.trim()]);
-    setText("");
+export default function Page() {
+  const [screen, setScreen] = useState<Screen>("home");
+  const [health, setHealth] = useState<Health | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [policies, setPolicies] = useState<PolicyRule[]>([]);
+  const [memory, setMemory] = useState<MemoryItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [command, setCommand] = useState("");
+  const [sending, setSending] = useState(false);
+  const [messages, setMessages] = useState<Array<{ role: "user" | "agent"; text: string }>>([]);
+
+  const refresh = useCallback(async () => {
+    try {
+      setError(null);
+      const [h, t, p, m] = await Promise.all([
+        core<Health>("/health"),
+        core<Task[]>("/tasks"),
+        core<PolicyRule[]>("/policies"),
+        core<MemoryItem[]>("/memory"),
+      ]);
+      setHealth(h);
+      setTasks(t);
+      setPolicies(p);
+      setMemory(m);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не вдалося зʼєднатися з ALTER Core");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const activeTasks = useMemo(() => tasks.filter((t) => !["done", "failed"].includes(t.status)), [tasks]);
+  const currentTask = activeTasks[0] ?? tasks[0] ?? null;
+
+  async function submitCommand(event: FormEvent) {
+    event.preventDefault();
+    const objective = command.trim();
+    if (!objective || sending) return;
+    setSending(true);
+    setMessages((items) => [...items, { role: "user", text: objective }]);
+    setCommand("");
+    try {
+      const task = await core<Task>("/tasks", {
+        method: "POST",
+        body: JSON.stringify({ objective, acceptance_criteria: [] }),
+      });
+      setMessages((items) => [...items, { role: "agent", text: `Задачу записано в Core/Postgres. Статус: ${statusLabel[task.status]}. ID: ${task.id.slice(0, 8)}…` }]);
+      await refresh();
+    } catch (e) {
+      setMessages((items) => [...items, { role: "agent", text: `Не вдалося створити задачу: ${e instanceof Error ? e.message : "невідома помилка"}` }]);
+    } finally {
+      setSending(false);
+    }
   }
 
   return (
-    <>
-      <Header />
-      <div className="statusRow"><StatusChip>Виконує</StatusChip><span className="microPill"><ListChecks size={13}/> 3 активні задачі</span></div>
-
-      <section className="focusCard glowBorder">
-        <div className="focusTop">
-          <div>
-            <div className="eyebrow">ПОТОЧНА ЗАДАЧА</div>
-            <h1>Публікація 30-секундного відео</h1>
-          </div>
-          <button className="orbPlay"><Play size={23} fill="currentColor" /></button>
-        </div>
-        <div className="progressTrack"><span style={{ width: "67%" }} /></div>
-        <div className="focusMeta"><b>6/9 кроків</b><span><Globe2 size={15}/> Поточна поверхня <strong>Браузер</strong></span><span>Далі <strong>Погодити опис</strong></span></div>
-      </section>
-
-      <div className="tabStrip">
-        <button className="active"><MessageCircle size={17}/> Чат</button>
-        <button><Layers3 size={17}/> Артефакти</button>
-        <button onClick={() => setScreen("files")}><Folder size={17}/> Файли</button>
-        <button><History size={17}/> Хронологія</button>
-      </div>
-
-      <section className="chatPanel glassPanel">
-        <div className="chatMessage agent">
-          <Logo />
-          <div><small>ALTER · 19:42</small><p>Починаю виконання задачі: створити та опублікувати 30-секундне відео.</p><ol><li>Аналіз цілі та аудиторії</li><li>Генерація сценарію</li><li>Створення відео</li><li>Підбір опису та хештегів</li><li>Погодження</li><li>Публікація та звіт</li></ol></div>
-        </div>
-        <div className="chatMessage user"><div className="userAvatar">В</div><div><small>Ви · 19:43</small><p>Ок, роби. Тема — понеділкове натхнення для продуктивності.</p></div></div>
-        <div className="chatMessage agent">
-          <Logo />
-          <div className="wideMessage"><small>ALTER · 19:47</small><p>Чернетка готова. Переглянь і дай знати, що змінити.</p>
-            <div className="draftCard">
-              <div className="draftThumb"><div className="mountain"/><Play size={24} /></div>
-              <div className="draftCopy"><strong>Чернетка відео v1</strong><span>30 сек · 16:9 · 1080p</span><p>Понеділок — новий старт. Маленькі кроки сьогодні = великі результати завтра.</p><div className="tags">#понеділок #продуктивність #фокус</div></div>
-              <div className="draftActions"><button className="outlineAccent"><CheckCircle2 size={16}/> Схвалити</button><button className="outlineDanger">Відхилити</button><button>Ще варіант</button></div>
-            </div>
-          </div>
-        </div>
-        {messages.map((m) => <div className="chatMessage user" key={m}><div className="userAvatar">В</div><div><small>Ви · щойно</small><p>{m}</p></div></div>)}
-        <div className="executionSummary"><div><span>Готово</span><b>4/6</b></div><div><span>Частково</span><b>1/6</b></div><div><span>Заблоковано</span><b>1/6</b></div></div>
-      </section>
-
-      <form className="commandComposer" onSubmit={send}>
-        <button type="button" className="plusButton"><Plus size={22}/></button>
-        <input value={text} onChange={(e)=>setText(e.target.value)} placeholder="Напишіть ALTER..." />
-        <button type="button" className="voiceButton"><Mic size={20}/></button>
-        <button className="sendButton"><Send size={18}/></button>
-        <div className="composerModes"><button type="button"><Activity size={16}/> Говорити</button><button type="button"><Monitor size={16}/> Екран</button><button type="button">Режим: AUTO</button></div>
-      </form>
-    </>
-  );
-}
-
-function BrowserScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
-  const [control, setControl] = useState<"me"|"agent"|"shared">("shared");
-  return (
-    <>
-      <Header title="Browser" back onBack={()=>setScreen("home")} />
-      <div className="controlSegment">
-        <button className={control==="me"?"active":""} onClick={()=>setControl("me")}>Я керую</button>
-        <button className={control==="agent"?"active":""} onClick={()=>setControl("agent")}>Агент керує</button>
-        <button className={control==="shared"?"active":""} onClick={()=>setControl("shared")}>Разом / Спільна сесія</button>
-      </div>
-      <div className="sessionStatus"><StatusChip>Спільна сесія активна</StatusChip><StatusChip tone="violet">ALTER Agent підключений</StatusChip></div>
-
-      <section className="browserFrame glowBorder">
-        <div className="browserTabs"><span>● Figma – Dashboard <b>×</b></span><span>◉ Analytics · ALTER <b>×</b></span><button>+</button></div>
-        <div className="browserToolbar"><ChevronLeft size={17}/><ChevronRight size={17}/><Activity size={17}/><div className="address"><Lock size={14}/> https://app.figma.com/dashboard</div><MoreVertical size={17}/></div>
-        <div className="fakeWeb">
-          <aside><b>Figma</b><div className="fakeSearch">⌕ Пошук</div><span>◷ Останні</span><span>□ Чернетки</span><span>♙ Спільні з вами</span><span>⊞ Бібліотека команд</span><small>КОМАНДИ</small><span>◈ ALTER Labs ＋</span></aside>
-          <main><h3>Дашборд</h3><small>Останні файли</small><div className="fileCards"><div><div className="filePreview dark"/><b>ALTER Design System</b><small>Змінено 2 год тому</small></div><div><div className="filePreview purple"/><b>Marketing Website</b><small>Змінено вчора</small></div><div className="selected"><div className="filePreview blue"/><b>Mobile App UI Kit</b><small>Змінено 3 дні тому</small></div></div></main>
-          <aside className="agentRail"><h4>Поточне завдання</h4><p>Оновлення дизайн-системи</p><div className="miniProgress"><span/></div><h4>Останні дії агента</h4><ul><li>Відкрив файл ALTER Design System</li><li>Оновив компонент Button / Primary</li><li>Додав варіант Button / Primary / Icon</li></ul><h4>Авторизація</h4><StatusChip>Сесія авторизована</StatusChip></aside>
-        </div>
-      </section>
-      <div className="browserActions"><button><Pause size={17}/> Пауза</button><button><Eye size={17}/> Live-перегляд</button><button className="primaryAction"><Play size={17}/> Продовжити завдання</button></div>
-      <button className="wideAction"><Activity size={17}/> Передати керування агенту</button>
-    </>
-  );
-}
-
-function TasksScreen() {
-  return (
-    <>
-      <Header />
-      <div className="largeTabs"><button className="active">Задачі</button><button>Пам’ять</button></div>
-      <div className="searchRow"><div className="searchBox"><Search size={18}/> Пошук задач, проектів, людей...</div><button className="filterButton"><Filter size={18}/> Фільтри</button><button className="roundPrimary"><Plus size={22}/></button></div>
-      <section className="kanban">
-        {taskColumns.map((column)=><div className="kanbanCol" key={column.title}><div className="kanbanHead"><b>{column.title}</b><span>{column.count}</span><MoreVertical size={16}/></div>{column.tasks.map((task)=><div className="taskCard" key={task[0]}><strong>{task[0]}</strong><small>▣ {task[1]}</small><div><Globe2 size={14}/><span className={`risk ${task[2]==="Високий"?"high":task[2]==="Середній"?"medium":"low"}`}>{task[2]}</span></div></div>)}</div>)}
-        <div className="kanbanCol blocked"><div className="kanbanHead"><b>Заблоковано</b><span>1</span></div><div className="taskCard"><strong>Інтеграція з CMS</strong><small>Чекає на відповідь</small><div><Link2 size={14}/><span className="risk low">Низький</span></div></div></div>
-        <div className="kanbanCol done"><div className="kanbanHead"><b>Готово</b><span>3</span></div><ul className="doneList"><li>Бекап сховища завершено</li><li>Публікація 30-сек. відео</li><li>Аналіз конкурентів (Q2)</li></ul></div>
-      </section>
-      <section className="memoryPanel glassPanel"><div className="sectionHead"><div><h2>Пам’ять</h2><p>Профіль · Світ / Проекти · Епізоди</p></div><Brain size={22}/></div><div className="profileCard"><div className="userAvatar big">В</div><div><b>Користувач: Ви</b><StatusChip>Активний</StatusChip><p>Контент-креатор і продюсер. Фокус на коротких відео, автоматизаціях та якості.</p><div className="tags"><span>Мова: Українська</span><span>Формат: 9:16</span><span>Стиль: Динамічний</span></div></div></div><div className="recurring"><Activity size={20}/><div><b>Щоденний звіт по контенту</b><small>Наступний запуск: сьогодні 21:00</small></div><button>Пауза</button></div></section>
-    </>
-  );
-}
-
-function ConnectorsScreen() {
-  return (
-    <>
-      <Header title="Конектори" />
-      <div className="largeTabs four"><button className="active">Через сервіс</button><button>API-ключ</button><button>Пристрій</button><button>Маркет</button></div>
-      <p className="helper">Підключайте сервіси з мінімально необхідними правами. <StatusChip>Безпечно за замовчуванням</StatusChip></p>
-      <h2 className="sectionHeading">Підключені сервіси</h2>
-      <div className="connectorGrid">{connectors.map(([name,rights,badge])=><div className="connectorCard" key={name}><div className="connectorIcon">{badge}</div><MoreVertical size={17}/><h3>{name}</h3><StatusChip>Підключено</StatusChip><small>Права</small><p>{rights}</p></div>)}</div>
-      <section className="oauthBanner glowBorder"><div className="oauthIcon"><ShieldCheck size={25}/></div><div><h3>Підключення сервісу через OAuth 2.0</h3><p>Надавайте тільки потрібні права — без паролів і зайвого доступу.</p></div><button className="primaryAction">Підключити сервіс</button></section>
-      <section className="accessPanel glassPanel"><div className="sectionHead"><div><small>Остання перевірка доступу · 2 хв тому</small><h3>Доступ надано безпечно</h3></div><button>Тестувати знову</button></div><div className="permissionGrid"><span>✓ Читання</span><span>✓ Чернетки</span><span>✓ Публікація</span><span>✓ Файли</span></div></section>
-      <h2 className="sectionHeading">Маркет конекторів</h2>
-      <div className="marketList">{[["Airtable Connector","Популярний"],["GitHub Integration","Офіційний"],["Slack Notifier","Рекомендований"]].map(([n,t])=><div key={n}><div className="marketIcon"><Plug size={21}/></div><div><b>{n}</b><span>{t}</span><small>Права: читання, запис · Ризик: низький</small></div><button>Встановити</button></div>)}</div>
-    </>
-  );
-}
-
-function ModelsScreen() {
-  return (
-    <>
-      <Header title="Моделі" />
-      <div className="modelTabs"><button className="active">Доступні</button><button>Довірені</button><button>На перевірці <b>2</b></button><button>Локальні</button><button>API</button><button>Архів</button></div>
-      <div className="searchRow"><div className="searchBox"><Search size={18}/> Пошук моделей...</div><button className="filterButton"><Filter size={18}/> Фільтри</button></div>
-      <div className="modelList">{models.map(([name,quality,speed,cost,status],idx)=><article className="modelCard" key={name}><div className="modelTop"><div className={`modelGlyph g${idx}`}><Brain size={25}/></div><div><h2>{name}</h2><span className={status.includes("ПЕРЕВ")?"badge amber":"badge"}>{status}</span><small>Останній тест: {idx===0?"12 хв тому":idx===1?"1 год тому":"28 хв тому"}</small></div><StatusChip tone={idx===2?"amber":"green"}>{idx===2?"Тестується":"Онлайн"}</StatusChip><MoreVertical size={18}/></div><div className="capabilities"><span>Текст</span><span>Код</span>{idx!==1&&<span>Зображення</span>}<span>Tools</span></div><div className="modelStats"><div><small>Якість</small><b>{quality}/100</b><i style={{width:`${quality}%`}}/></div><div><small>Швидкість</small><b>{speed}</b></div><div><small>Вартість</small><b>{cost}</b><small>/1K токенів</small></div><div><small>Ліцензія</small><b>Комерційна</b></div></div></article>)}</div>
-      <section className="comparison glassPanel"><small>Порівняння: поточна модель vs нова кандидатка</small><div><section><StatusChip>Поточна модель</StatusChip><h3>VideoGen V2</h3><b>92/100 · 1.8 c · $0.012</b></section><span className="vs">VS</span><section><StatusChip tone="amber">Нова кандидатка</StatusChip><h3>VideoGen V2.1</h3><b>94/100 · 2.1 c · $0.009</b></section></div><div className="comparisonActions"><button>Залишити поточну</button><button className="primaryAction">Перейти на нову</button><button>Порівняти ще</button></div></section>
-    </>
-  );
-}
-
-function VaultScreen() {
-  return (
-    <>
-      <Header />
-      <div className="titleWithActions"><div><h1>Сховище</h1><p>Керування секретними з’єднаннями та доступом через псевдоніми. Сирі значення приховані.</p></div><button className="roundPrimary"><Plus size={21}/></button><button className="filterButton"><Filter size={18}/> Фільтри</button></div>
-      <div className="securityNotice"><Shield size={18}/> Показуються лише псевдоніми. Сирі секрети завжди приховані.</div>
-      <div className="secretList">{secrets.map(([name,type,level,time],idx)=><article className="secretCard" key={name}><div className="secretIcon">{idx===0?"aws":idx===1?"pg":"gh"}</div><div className="secretMain"><div className="secretTitle"><h2>{name}</h2><span>{type}</span><MoreVertical size={17}/></div><div className="secretGrid"><span>Псевдонім <b>{name}</b></span><span>Рівень доступу <b>{level}</b></span><span>Статус <StatusChip>Активний</StatusChip></span><span>Остання перевірка <b>{time}</b></span></div><div className="secretActions"><button>Перевірити</button><button>Змінити права</button><button><Pause size={15}/> Призупинити</button><button className="danger">Відкликати</button></div></div></article>)}</div>
-      <section className="usageLog glassPanel"><div className="sectionHead"><h2>Журнал використання</h2><button>Переглянути все</button></div>{[["Linux","aws-prod-readonly","Оновлення системи"],["Браузер","pg-analytics","Запит звіту"],["Конектори","github-actions-bot","Деплой релізу"]].map((x)=><div className="usageRow" key={x[0]}><span>{x[0]}</span><small>Використав {x[1]}</small><b>Завдання: {x[2]}</b><time>2 хв тому</time></div>)}</section>
-    </>
-  );
-}
-
-function RulesScreen() {
-  const [state,setState]=useState(rules.map(r=>r[1]));
-  return (
-    <>
-      <Header title="Правила" />
-      <p className="lead">Встановлюйте особисті правила для ALTER. Він буде діяти згідно з ними кожного дня.</p>
-      <div className="ruleComposer"><Plus size={22}/><input placeholder="Напишіть правило своїми словами"/><Mic size={19}/><button><Sparkles size={19}/></button></div>
-      <div className="sectionHead"><h2>Мої правила <span className="countBubble">4</span></h2><small>Увімкнено: {state.filter(Boolean).length} з 4</small></div>
-      <div className="rulesList">{rules.map(([name,,scope],idx)=><article className="ruleCard" key={name}><div className={`ruleSymbol r${idx}`}>{idx===0?"⊘":idx===1?"✎":idx===2?"$":"✉"}</div><div><h3>{name}</h3><div className="ruleMeta"><span>Статус <button className={`toggle ${state[idx]?"on":""}`} onClick={()=>setState(s=>s.map((v,i)=>i===idx?!v:v))}><i/></button></span><span>Сфера дії <b>{scope}</b></span><span>Винятки <b>{idx===1?"Клієнти":idx===2?"Термінові задачі":"Немає"}</b></span></div></div><button className="testButton">⚗ Тест</button></article>)}</div>
-      <section className="immutable glowBorder"><div className="sectionHead"><div><h3>Системні межі безпеки <span>Незмінні</span></h3><p>Ці правила захищають Вас і дані. Їх не можна вимкнути.</p></div><Lock size={30}/></div><ul><li>Не розголошуй персональні дані</li><li>Не виконуй небезпечні команди</li><li>Поважай приватність інших</li></ul></section>
-    </>
-  );
-}
-
-function PeopleScreen() {
-  return (
-    <>
-      <Header title="Люди" />
-      <p className="lead">Керуйте доступом, ролями та ізольованими середовищами.</p>
-      <div className="roleGrid">{[["Власник","Повний контроль над усіма даними, модулями та налаштуваннями.","Ви"],["Партнер","Довірений доступ до вибраних модулів та даних.","1 користувач"],["Гість","Обмежений доступ лише до наданих модулів та даних.","0 користувачів"]].map(([r,d,c],i)=><article key={r}><div className="roleIcon">{i===0?"♛":i===1?"🤝":"♙"}</div><h2>{r}</h2><p>{d}</p><span>{c}</span></article>)}</div>
-      <section className="inviteBanner glassPanel"><div className="inviteIcon"><UserPlus size={26}/></div><div><h2>Додати людину</h2><p>Запросіть партнера через безпечне посилання.</p><a>Детальніше ›</a></div><button className="primaryAction">Створити запрошення</button></section>
-      <section className="permissionsTable glassPanel"><h2>Права доступу</h2><p>Налаштуйте, що може бачити та змінювати кожна роль.</p><div className="permissionHeader"><span>Модуль</span><span>Власник</span><span>Партнер</span><span>Гість</span></div>{[["Браузер","Повний","Обмежений","Немає"],["Android","Повний","Обмежений","Немає"],["Файли","Повний","Обмежений","Немає"],["Пам’ять","Повний","Тільки читання","Немає"],["Задачі","Повний","Повний","Немає"],["Правила","Повний","Обмежений","Немає"]].map(r=><div className="permissionRow" key={r[0]}><b>{r[0]}</b><span>✓ {r[1]}</span><span>– {r[2]}</span><span>× {r[3]}</span></div>)}</section>
-      <section className="environmentCard glassPanel"><h2>Ізольовані середовища</h2><p>Кожен користувач працює у власному просторі.</p><div className="personEnv"><div className="userAvatar">A</div><div><b>Андрій</b><small>Партнер · Запрошення прийнято</small></div><span>🌐 Браузер · Профілі: 3</span><span>📁 Файли: 128</span><span>🧠 Пам’ять: 42</span><ChevronRight size={18}/></div></section>
-    </>
-  );
-}
-
-function AndroidScreen() {
-  const devices = [["Pixel 7 Pro","Виконує","Chrome","1.2 ГБ"],["Samsung S23","Очікує вас","Instagram","886 МБ"],["Xiaomi 13T","Показує, що пропонує","Telegram","1.6 ГБ"],["Pixel 6a","Очікує вас","YouTube","512 МБ"]];
-  return (
-    <>
-      <Header title="Android" />
-      <div className="androidTop"><button className="primaryAction"><Plus size={18}/> Додати пристрій</button><button className="filterButton"><ListChecks size={18}/></button></div>
-      <section className="androidWorkspace"><div className="deviceList">{devices.map((d,i)=><button className={`deviceCard ${i===0?"active":""}`} key={d[0]}><div><h3>{d[0]}</h3><StatusChip tone={i===0?"green":"violet"}>{d[1]}</StatusChip><span>{d[2]}</span><small>{d[3]} вільно</small><div className="miniProgress"><span style={{width:`${70-i*12}%`}}/></div></div><Play size={20}/></button>)}<button className="createProfile"><Plus size={18}/> Створити профіль</button></div><div className="phonePanel glassPanel"><div className="phonePanelHead"><div><h2>Pixel 7 Pro</h2><StatusChip>Виконує</StatusChip></div><MoreVertical size={18}/></div><div className="androidPhone"><div className="phoneStatus">19:56 <Wifi size={14}/></div><div className="wallpaper"/><div className="appGrid">{["Chrome","Gmail","Maps","Drive","YouTube","Photos","Telegram","Play"].map(n=><div key={n}><span>{n[0]}</span><small>{n}</small></div>)}</div><div className="dock">● ● ● ●</div></div><button className="wideAction">↗ Відкрити</button><div className="phoneControls"><button>Клонувати профіль</button><button>Контрольна точка</button><button>Перезапустити</button><button>Запис екрана</button></div></div></section>
-      <section className="agentState glassPanel"><h3>Стан агента</h3><div><StatusChip>Виконує</StatusChip><StatusChip tone="violet">Показує, що пропонує</StatusChip><span className="microPill">Ⅱ Очікує вас</span></div></section>
-      <div className="warningBanner"><AlertTriangle size={22}/><p>Усі входи в акаунти, 2FA та CAPTCHA виконуються вручну власником перед продовженням. ALTER не має доступу до ваших облікових даних.</p></div>
-    </>
-  );
-}
-
-function FilesScreen() {
-  return <><Header title="Файли"/><div className="searchRow"><div className="searchBox"><Search size={18}/> Пошук у файлах...</div><button className="roundPrimary"><Plus size={22}/></button></div><div className="fileLibrary">{[["ALTER Design System","FIG · 48 MB","2 год тому"],["Marketing Website","ZIP · 12 MB","вчора"],["Mobile App UI Kit","FIG · 64 MB","3 дні тому"],["Q2 Analytics","PDF · 8 MB","5 днів тому"]].map((f,i)=><article key={f[0]}><div className={`largeFilePreview p${i}`}><File size={30}/></div><h3>{f[0]}</h3><span>{f[1]}</span><small>{f[2]}</small></article>)}</div><section className="glassPanel storageCard"><div><HardDrive size={24}/><div><h3>Сховище ALTER</h3><p>Файли ізольовані за workspace та доступом.</p></div></div><div className="progressTrack"><span style={{width:"38%"}}/></div><small>19.4 GB із 50 GB</small></section></>;
-}
-
-export default function AlterApp() {
-  const [screen, setScreen] = useState<Screen>("home");
-  const content = useMemo(() => {
-    switch (screen) {
-      case "browser": return <BrowserScreen setScreen={setScreen}/>;
-      case "tasks": return <TasksScreen/>;
-      case "connectors": return <ConnectorsScreen/>;
-      case "models": return <ModelsScreen/>;
-      case "vault": return <VaultScreen/>;
-      case "rules": return <RulesScreen/>;
-      case "people": return <PeopleScreen/>;
-      case "android": return <AndroidScreen/>;
-      case "files": return <FilesScreen/>;
-      default: return <HomeScreen setScreen={setScreen}/>;
-    }
-  }, [screen]);
-
-  return (
     <main className="appShell">
-      <div className="ambient one"/><div className="ambient two"/>
+      <div className="ambient one" /><div className="ambient two" />
       <div className="appSurface">
-        {screen === "home" && <div className="quickModules">{modules.slice(1,6).map(({id,label,icon:Icon})=><button key={id} onClick={()=>setScreen(id)}><Icon size={16}/><span>{label}</span></button>)}</div>}
-        {content}
+        <Header title={screen === "home" ? undefined : modules.find((m) => m.id === screen)?.label} />
+
+        <div className="quickModules">
+          {modules.map(({ id, label, icon: Icon }) => (
+            <button key={id} onClick={() => setScreen(id)} style={screen === id ? { borderColor: "var(--line-strong)", color: "#d8d3ff" } : undefined}>
+              <Icon size={14} /> {label}
+            </button>
+          ))}
+        </div>
+
+        {error && (
+          <section className="glassPanel" style={{ borderRadius: 18, padding: 14, marginBottom: 14, borderColor: "rgba(237,98,95,.4)" }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}><AlertTriangle size={18} /><b>Core недоступний</b></div>
+            <p style={{ color: "var(--muted)", marginBottom: 0 }}>{error}</p>
+          </section>
+        )}
+
+        {screen === "home" && (
+          <>
+            <div className="statusRow">
+              <StatusChip tone={health?.status === "ok" ? "green" : "amber"}>{health?.status === "ok" ? "Core online" : loading ? "Перевірка Core…" : "Core offline"}</StatusChip>
+              <span className="microPill"><Database size={13} /> {health?.storage === "postgres" ? "Postgres" : health?.storage ?? "—"}</span>
+              <span className="microPill"><ListChecks size={13} /> {activeTasks.length} активних</span>
+            </div>
+
+            <section className="focusCard glowBorder">
+              <div className="focusTop">
+                <div>
+                  <div className="eyebrow">ПОТОЧНА ЗАДАЧА · LIVE DATA</div>
+                  <h1>{currentTask?.objective ?? "Немає активних задач"}</h1>
+                </div>
+                <button className="orbPlay" onClick={() => setScreen("tasks")}><ListChecks size={23} /></button>
+              </div>
+              {currentTask && (
+                <>
+                  <div className="progressTrack"><span style={{ width: currentTask.status === "done" ? "100%" : currentTask.status === "executing" ? "66%" : "28%" }} /></div>
+                  <div className="focusMeta">
+                    <b>{statusLabel[currentTask.status]}</b>
+                    <span>Крок <strong>{currentTask.current_step ?? "—"}</strong></span>
+                    <span>Оновлено <strong>{new Date(currentTask.updated_at).toLocaleTimeString("uk-UA", { hour: "2-digit", minute: "2-digit" })}</strong></span>
+                  </div>
+                </>
+              )}
+            </section>
+
+            <section className="chatPanel glassPanel" style={{ marginTop: 16 }}>
+              <div className="chatMessage agent"><Logo /><div><small>ALTER · LIVE</small><p>Core підключений до Neon Postgres. Команди нижче створюють справжні задачі, а не локальну імітацію.</p></div></div>
+              {messages.map((m, i) => (
+                <div className={`chatMessage ${m.role}`} key={`${m.role}-${i}`}>
+                  {m.role === "agent" ? <Logo /> : <div className="userAvatar">В</div>}
+                  <div><small>{m.role === "agent" ? "ALTER" : "Ви"} · щойно</small><p>{m.text}</p></div>
+                </div>
+              ))}
+            </section>
+
+            <form className="commandComposer" onSubmit={submitCommand}>
+              <button type="button" className="plusButton" aria-label="Додати"><Plus size={22} /></button>
+              <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="Створити задачу для ALTER…" disabled={sending} />
+              <span />
+              <button className="sendButton" disabled={sending} aria-label="Надіслати"><Send size={18} /></button>
+              <div className="composerModes"><button type="button">Core</button><button type="button">Postgres</button><button type="button">Policy first</button></div>
+            </form>
+          </>
+        )}
+
+        {screen === "tasks" && <TasksScreen tasks={tasks} refresh={refresh} />}
+        {screen === "rules" && <RulesScreen policies={policies} refresh={refresh} />}
+        {screen === "memory" && <MemoryScreen memory={memory} refresh={refresh} />}
+        {screen === "connectors" && <ConnectorsScreen health={health} />}
+        {screen === "browser" && <HonestPlaceholder title="Браузер" icon={Globe2} text="UI готовий, але remote Playwright/Browser executor ще не підʼєднаний. ALTER не буде показувати фальшиву активну сесію." />}
+        {screen === "android" && <HonestPlaceholder title="Android" icon={Smartphone} text="Ізольований Android executor ще не запущений. Входи, 2FA та CAPTCHA мають залишатися під вашим ручним контролем." />}
+        {screen === "models" && <HonestPlaceholder title="Моделі" icon={Brain} text="Model Router ще не має production registry. Демонстраційні VideoGen/CodeCraft/VisionPro прибрані як неіснуючі runtime-моделі." />}
+        {screen === "vault" && <HonestPlaceholder title="Сховище" icon={KeyRound} text="Vercel secrets уже захищають Core-токен, але окремий ALTER Vault з alias/rotation/audit ще не реалізований." />}
+        {screen === "people" && <HonestPlaceholder title="Люди" icon={Users} text="Production RBAC та запрошення Partner/Guest ще не реалізовані. Поточний Core працює в single-owner режимі." />}
+        {screen === "files" && <HonestPlaceholder title="Файли" icon={Folder} text="Файлове сховище та індексація ще не підʼєднані до Core. Тут не показуються вигадані файли." />}
+
+        <nav className="bottomNav" aria-label="Основна навігація">
+          {[
+            ["home", "ALTER", Bot],
+            ["tasks", "Задачі", ListChecks],
+            ["connectors", "Конектори", Link2],
+            ["memory", "Памʼять", MemoryStick],
+            ["rules", "Правила", Shield],
+          ].map(([id, label, Icon]) => {
+            const C = Icon as Icon;
+            return <button key={id as string} className={screen === id ? "active" : ""} onClick={() => setScreen(id as Screen)}><C size={20} /><span>{label as string}</span></button>;
+          })}
+        </nav>
       </div>
-      <BottomNav screen={screen} setScreen={setScreen}/>
     </main>
   );
 }
+
+function TasksScreen({ tasks, refresh }: { tasks: Task[]; refresh: () => Promise<void> }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  async function transition(task: Task, action: "ready" | "complete") {
+    setBusy(task.id);
+    try {
+      await core<Task>(`/tasks/${task.id}/${action}`, { method: "POST", body: "{}" });
+      await refresh();
+    } finally { setBusy(null); }
+  }
+  return (
+    <section className="glassPanel" style={{ borderRadius: 22, padding: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}><div><b>Реальні задачі</b><div style={{ color: "var(--muted)", fontSize: 12 }}>Джерело: Core / Postgres</div></div><StatusChip>{tasks.length}</StatusChip></div>
+      <div style={{ display: "grid", gap: 10 }}>
+        {tasks.length === 0 && <p style={{ color: "var(--muted)" }}>Ще немає задач. Створи першу на головному екрані.</p>}
+        {tasks.map((task) => (
+          <article key={task.id} className="ruleCard" style={{ borderRadius: 16, padding: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><strong>{task.objective}</strong><StatusChip tone={task.status === "failed" || task.status === "blocked_by_rule" ? "red" : task.status === "awaiting_approval" ? "amber" : "green"}>{statusLabel[task.status]}</StatusChip></div>
+            <div style={{ color: "var(--muted)", marginTop: 8, fontSize: 12 }}>Крок: {task.current_step ?? "—"}{task.blocker ? ` · ${task.blocker}` : ""}</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+              {task.status === "planning" && <button className="wideAction" disabled={busy === task.id} onClick={() => void transition(task, "ready")}>Позначити Ready</button>}
+              {!["done", "failed"].includes(task.status) && <button className="wideAction" disabled={busy === task.id} onClick={() => void transition(task, "complete")}><CheckCircle2 size={15} /> Завершити</button>}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function RulesScreen({ policies, refresh }: { policies: PolicyRule[]; refresh: () => Promise<void> }) {
+  const [text, setText] = useState("");
+  const [category, setCategory] = useState("general");
+  const [effect, setEffect] = useState<PolicyRule["effect"]>("deny");
+  const [busy, setBusy] = useState(false);
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!text.trim()) return;
+    setBusy(true);
+    try {
+      await core<PolicyRule>("/policies", { method: "POST", body: JSON.stringify({ original_text: text.trim(), category, effect, priority: 100 }) });
+      setText("");
+      await refresh();
+    } finally { setBusy(false); }
+  }
+  return (
+    <>
+      <form className="glassPanel" onSubmit={submit} style={{ borderRadius: 20, padding: 14, display: "grid", gap: 10 }}>
+        <b>Додати реальне правило</b>
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Наприклад: Не публікуй без мого схвалення" style={fieldStyle} />
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          <input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="category" style={fieldStyle} />
+          <select value={effect} onChange={(e) => setEffect(e.target.value as PolicyRule["effect"])} style={fieldStyle}><option value="deny">Deny</option><option value="require_approval">Require approval</option><option value="allow">Allow</option></select>
+        </div>
+        <button className="wideAction" disabled={busy}><Plus size={15} /> Зберегти в Policy Engine</button>
+      </form>
+      <section style={{ display: "grid", gap: 10, marginTop: 12 }}>
+        {policies.length === 0 && <div className="glassPanel" style={{ borderRadius: 18, padding: 14, color: "var(--muted)" }}>Користувацьких правил ще немає. Незмінні системні межі безпеки діють у Core окремо.</div>}
+        {policies.map((rule) => <article className="ruleCard" key={rule.id} style={{ borderRadius: 16, padding: 14 }}><div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><strong>{rule.original_text}</strong><StatusChip tone={rule.effect === "deny" ? "red" : rule.effect === "require_approval" ? "amber" : "green"}>{rule.effect}</StatusChip></div><div style={{ color: "var(--muted)", marginTop: 8, fontSize: 12 }}>{rule.category} · priority {rule.priority}</div></article>)}
+      </section>
+    </>
+  );
+}
+
+function MemoryScreen({ memory, refresh }: { memory: MemoryItem[]; refresh: () => Promise<void> }) {
+  const [namespace, setNamespace] = useState("profile");
+  const [key, setKey] = useState("");
+  const [value, setValue] = useState("");
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!key.trim()) return;
+    await core<MemoryItem>("/memory", { method: "PUT", body: JSON.stringify({ namespace, key: key.trim(), value }) });
+    setKey(""); setValue(""); await refresh();
+  }
+  return (
+    <>
+      <form className="glassPanel" onSubmit={submit} style={{ borderRadius: 20, padding: 14, display: "grid", gap: 10 }}>
+        <b>Запис у постійну памʼять</b>
+        <input value={namespace} onChange={(e) => setNamespace(e.target.value)} placeholder="namespace" style={fieldStyle} />
+        <input value={key} onChange={(e) => setKey(e.target.value)} placeholder="key" style={fieldStyle} />
+        <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="value" style={fieldStyle} />
+        <button className="wideAction"><Database size={15} /> Зберегти в Postgres</button>
+      </form>
+      <section className="memoryPanel" style={{ borderRadius: 20, padding: 14, marginTop: 12 }}>
+        {memory.length === 0 ? <p style={{ color: "var(--muted)" }}>Памʼять поки порожня.</p> : memory.map((item, i) => <div key={item.id ?? `${item.namespace}-${item.key}-${i}`} style={{ padding: "11px 0", borderBottom: "1px solid var(--line)" }}><div style={{ color: "#958bff", fontSize: 11 }}>{item.namespace}</div><strong>{item.key}</strong><div style={{ color: "var(--muted)", marginTop: 4 }}>{typeof item.value === "string" ? item.value : JSON.stringify(item.value)}</div></div>)}
+      </section>
+    </>
+  );
+}
+
+function ConnectorsScreen({ health }: { health: Health | null }) {
+  const items = [
+    { name: "ALTER Core", status: health?.status === "ok" ? "Підключено" : "Недоступний", live: health?.status === "ok", detail: health ? `v${health.version}` : "—" },
+    { name: "Neon Postgres", status: health?.storage === "postgres" ? "Підключено" : "Не підтверджено", live: health?.storage === "postgres", detail: "Tasks · Rules · Memory · Audit" },
+    { name: "Botpress", status: "Ще не підʼєднано до Core runtime", live: false, detail: "Окремий agent service" },
+    { name: "Browser executor", status: "Не налаштовано", live: false, detail: "Playwright / remote session" },
+    { name: "Android executor", status: "Не налаштовано", live: false, detail: "Isolated device runtime" },
+  ];
+  return <section style={{ display: "grid", gap: 10 }}>{items.map((item) => <article key={item.name} className="glassPanel" style={{ borderRadius: 18, padding: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}><div><strong>{item.name}</strong><div style={{ color: "var(--muted)", fontSize: 12, marginTop: 4 }}>{item.detail}</div></div><StatusChip tone={item.live ? "green" : "amber"}>{item.status}</StatusChip></article>)}</section>;
+}
+
+const fieldStyle: React.CSSProperties = {
+  width: "100%",
+  border: "1px solid var(--line)",
+  background: "rgba(255,255,255,.035)",
+  borderRadius: 12,
+  padding: "11px 12px",
+  outline: "none",
+};
