@@ -6,6 +6,7 @@ import {
   Bot,
   Brain,
   CheckCircle2,
+  Clock3,
   Database,
   Folder,
   Globe2,
@@ -19,11 +20,10 @@ import {
   ShieldCheck,
   Smartphone,
   Users,
-  Wifi,
 } from "lucide-react";
 import { type ComponentType, type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
-type Screen = "home" | "tasks" | "rules" | "memory" | "connectors" | "browser" | "android" | "models" | "vault" | "people" | "files";
+type Screen = "home" | "tasks" | "rules" | "memory" | "audit" | "connectors" | "browser" | "android" | "models" | "vault" | "people" | "files";
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
 type TaskStatus = "intake" | "planning" | "ready" | "executing" | "awaiting_approval" | "awaiting_login" | "awaiting_mfa" | "blocked_by_rule" | "recovering" | "paused" | "done" | "failed";
 
@@ -55,14 +55,34 @@ type MemoryItem = {
   updated_at?: string;
 };
 
-type Health = { service: string; status: string; version: string; storage: string };
+type AuditEvent = {
+  id: number;
+  task_id?: string | null;
+  actor_type: string;
+  actor_id?: string | null;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
 
+type ConnectorState = {
+  id?: string;
+  connector_key: string;
+  status: "available" | "connected" | "degraded" | "blocked" | "not_configured" | "unavailable";
+  capabilities: string[];
+  details: Record<string, unknown>;
+  checked_at?: string | null;
+  updated_at?: string;
+};
+
+type Health = { service: string; status: string; version: string; storage: string };
 type Module = { id: Screen; label: string; icon: Icon };
 
 const modules: Module[] = [
   { id: "home", label: "ALTER", icon: Bot },
   { id: "tasks", label: "Задачі", icon: ListChecks },
   { id: "memory", label: "Памʼять", icon: MemoryStick },
+  { id: "audit", label: "Хронологія", icon: Clock3 },
   { id: "rules", label: "Правила", icon: ShieldCheck },
   { id: "connectors", label: "Конектори", icon: Link2 },
   { id: "files", label: "Файли", icon: Folder },
@@ -122,6 +142,25 @@ function StatusChip({ children, tone = "green" }: { children: React.ReactNode; t
   return <span className={`statusChip ${tone}`}><i />{children}</span>;
 }
 
+function connectorTone(status: ConnectorState["status"]): "green" | "violet" | "amber" | "red" {
+  if (status === "connected") return "green";
+  if (status === "available") return "violet";
+  if (status === "degraded" || status === "not_configured") return "amber";
+  return "red";
+}
+
+function connectorLabel(status: ConnectorState["status"]): string {
+  const labels: Record<ConnectorState["status"], string> = {
+    connected: "Підключено",
+    available: "Доступний",
+    degraded: "Проблема",
+    blocked: "Заблоковано",
+    not_configured: "Не налаштовано",
+    unavailable: "Недоступний",
+  };
+  return labels[status];
+}
+
 function HonestPlaceholder({ title, icon: Icon, text }: { title: string; icon: Icon; text: string }) {
   return (
     <section className="glassPanel" style={{ borderRadius: 22, padding: 20 }}>
@@ -143,6 +182,8 @@ export default function Page() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [policies, setPolicies] = useState<PolicyRule[]>([]);
   const [memory, setMemory] = useState<MemoryItem[]>([]);
+  const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [connectors, setConnectors] = useState<ConnectorState[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [command, setCommand] = useState("");
@@ -152,16 +193,20 @@ export default function Page() {
   const refresh = useCallback(async () => {
     try {
       setError(null);
-      const [h, t, p, m] = await Promise.all([
+      const [h, t, p, m, a, c] = await Promise.all([
         core<Health>("/health"),
         core<Task[]>("/tasks"),
         core<PolicyRule[]>("/policies"),
         core<MemoryItem[]>("/memory"),
+        core<AuditEvent[]>("/audit?limit=100"),
+        core<ConnectorState[]>("/connectors"),
       ]);
       setHealth(h);
       setTasks(t);
       setPolicies(p);
       setMemory(m);
+      setAudit(a);
+      setConnectors(c);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не вдалося зʼєднатися з ALTER Core");
     } finally {
@@ -173,6 +218,7 @@ export default function Page() {
 
   const activeTasks = useMemo(() => tasks.filter((t) => !["done", "failed"].includes(t.status)), [tasks]);
   const currentTask = activeTasks[0] ?? tasks[0] ?? null;
+  const connectedCount = useMemo(() => connectors.filter((item) => item.status === "connected").length, [connectors]);
 
   async function submitCommand(event: FormEvent) {
     event.preventDefault();
@@ -222,6 +268,7 @@ export default function Page() {
               <StatusChip tone={health?.status === "ok" ? "green" : "amber"}>{health?.status === "ok" ? "Core online" : loading ? "Перевірка Core…" : "Core offline"}</StatusChip>
               <span className="microPill"><Database size={13} /> {health?.storage === "postgres" ? "Postgres" : health?.storage ?? "—"}</span>
               <span className="microPill"><ListChecks size={13} /> {activeTasks.length} активних</span>
+              <span className="microPill"><Link2 size={13} /> {connectedCount} connected</span>
             </div>
 
             <section className="focusCard glowBorder">
@@ -267,7 +314,8 @@ export default function Page() {
         {screen === "tasks" && <TasksScreen tasks={tasks} refresh={refresh} />}
         {screen === "rules" && <RulesScreen policies={policies} refresh={refresh} />}
         {screen === "memory" && <MemoryScreen memory={memory} refresh={refresh} />}
-        {screen === "connectors" && <ConnectorsScreen health={health} />}
+        {screen === "audit" && <AuditScreen events={audit} />}
+        {screen === "connectors" && <ConnectorsScreen connectors={connectors} />}
         {screen === "browser" && <HonestPlaceholder title="Браузер" icon={Globe2} text="UI готовий, але remote Playwright/Browser executor ще не підʼєднаний. ALTER не буде показувати фальшиву активну сесію." />}
         {screen === "android" && <HonestPlaceholder title="Android" icon={Smartphone} text="Ізольований Android executor ще не запущений. Входи, 2FA та CAPTCHA мають залишатися під вашим ручним контролем." />}
         {screen === "models" && <HonestPlaceholder title="Моделі" icon={Brain} text="Model Router ще не має production registry. Демонстраційні VideoGen/CodeCraft/VisionPro прибрані як неіснуючі runtime-моделі." />}
@@ -381,15 +429,22 @@ function MemoryScreen({ memory, refresh }: { memory: MemoryItem[]; refresh: () =
   );
 }
 
-function ConnectorsScreen({ health }: { health: Health | null }) {
-  const items = [
-    { name: "ALTER Core", status: health?.status === "ok" ? "Підключено" : "Недоступний", live: health?.status === "ok", detail: health ? `v${health.version}` : "—" },
-    { name: "Neon Postgres", status: health?.storage === "postgres" ? "Підключено" : "Не підтверджено", live: health?.storage === "postgres", detail: "Tasks · Rules · Memory · Audit" },
-    { name: "Botpress", status: "Ще не підʼєднано до Core runtime", live: false, detail: "Окремий agent service" },
-    { name: "Browser executor", status: "Не налаштовано", live: false, detail: "Playwright / remote session" },
-    { name: "Android executor", status: "Не налаштовано", live: false, detail: "Isolated device runtime" },
-  ];
-  return <section style={{ display: "grid", gap: 10 }}>{items.map((item) => <article key={item.name} className="glassPanel" style={{ borderRadius: 18, padding: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}><div><strong>{item.name}</strong><div style={{ color: "var(--muted)", fontSize: 12, marginTop: 4 }}>{item.detail}</div></div><StatusChip tone={item.live ? "green" : "amber"}>{item.status}</StatusChip></article>)}</section>;
+function AuditScreen({ events }: { events: AuditEvent[] }) {
+  return (
+    <section className="glassPanel" style={{ borderRadius: 22, padding: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 14 }}><div><b>Хронологія дій</b><div style={{ color: "var(--muted)", fontSize: 12 }}>Джерело: audit log у Postgres</div></div><StatusChip tone="violet">{events.length}</StatusChip></div>
+      {events.length === 0 ? <p style={{ color: "var(--muted)" }}>Подій ще немає. Створення задачі, правила або памʼяті автоматично зʼявиться тут.</p> : <div style={{ display: "grid", gap: 2 }}>{events.map((event) => <article key={event.id} style={{ display: "grid", gridTemplateColumns: "18px 1fr", gap: 10, padding: "10px 0", borderBottom: "1px solid var(--line)" }}><div style={{ width: 9, height: 9, marginTop: 5, borderRadius: 99, background: "#7666ff", boxShadow: "0 0 15px rgba(118,102,255,.5)" }} /><div><div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}><strong>{event.event_type}</strong><small style={{ color: "var(--muted)" }}>{new Date(event.created_at).toLocaleString("uk-UA", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</small></div><div style={{ color: "var(--muted)", marginTop: 4, fontSize: 12 }}>{event.task_id ? `task ${event.task_id.slice(0, 8)}… · ` : ""}{Object.keys(event.payload || {}).length ? JSON.stringify(event.payload) : event.actor_type}</div></div></article>)}</div>}
+    </section>
+  );
+}
+
+function ConnectorsScreen({ connectors }: { connectors: ConnectorState[] }) {
+  return (
+    <section style={{ display: "grid", gap: 10 }}>
+      {connectors.length === 0 && <div className="glassPanel" style={{ borderRadius: 18, padding: 14, color: "var(--muted)" }}>Registry конекторів порожній.</div>}
+      {connectors.map((item) => <article key={item.connector_key} className="glassPanel" style={{ borderRadius: 18, padding: 14, display: "grid", gap: 10 }}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}><div><strong>{item.connector_key}</strong><div style={{ color: "var(--muted)", fontSize: 12, marginTop: 4 }}>{item.capabilities.length ? item.capabilities.join(" · ") : "Без заявлених capabilities"}</div></div><StatusChip tone={connectorTone(item.status)}>{connectorLabel(item.status)}</StatusChip></div><div style={{ color: "var(--muted)", fontSize: 11 }}>Перевірено: {item.checked_at ? new Date(item.checked_at).toLocaleString("uk-UA", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}</div></article>)}
+    </section>
+  );
 }
 
 const fieldStyle: React.CSSProperties = {
