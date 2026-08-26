@@ -17,6 +17,7 @@ from .media_api import router as media_router
 from .memory_admin_api import router as memory_admin_router
 from .model_api import router as model_router
 from .productivity_api import router as productivity_router
+from .scheduler_api import router as scheduler_router
 from .system_api import router as system_router
 from .vault_api import router as vault_router
 
@@ -33,6 +34,7 @@ for router in (
     memory_admin_router,
     model_router,
     productivity_router,
+    scheduler_router,
     system_router,
     vault_router,
 ):
