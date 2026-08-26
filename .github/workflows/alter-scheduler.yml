@@ -1,0 +1,43 @@
+name: ALTER Hourly Scheduler
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: alter-hourly-scheduler
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Get short-lived GitHub OIDC token
+        id: oidc
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('alter-scheduler')
+            core.setSecret(token)
+            require('fs').writeFileSync('/tmp/alter-oidc', token, { mode: 0o600 })
+
+      - name: Run due ALTER automations
+        run: |
+          TOKEN="$(cat /tmp/alter-oidc)"
+          HTTP_CODE="$(curl --silent --show-error --output /tmp/alter-scheduler-response --write-out '%{http_code}' \
+            --request POST \
+            --header "Authorization: Bearer ${TOKEN}" \
+            --header 'Accept: application/json' \
+            'https://alter-app-three.vercel.app/api/scheduler/tick')"
+          cat /tmp/alter-scheduler-response
+          echo
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "ALTER scheduler returned HTTP $HTTP_CODE"
+            exit 1
+          fi
