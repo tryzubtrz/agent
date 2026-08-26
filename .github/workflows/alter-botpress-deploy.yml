@@ -14,7 +14,7 @@ permissions:
 
 concurrency:
   group: alter-botpress-production
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   BOTPRESS_WORKSPACE_ID: wkspace_01M0XTFXYMFEDGHEEKT710G22P
@@ -23,6 +23,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,7 +35,7 @@ jobs:
         run: |
           if [ -z "$BOTPRESS_PAT" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "BOTPRESS_PAT is not configured yet; deployment is safely skipped."
+            echo "BOTPRESS_PAT is not configured yet; deployment cannot continue."
             exit 3
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
