@@ -23,15 +23,14 @@ jobs:
         run: |
           git clone --depth 1 --branch alter-foundation https://github.com/tryzubtrz/ai.git /tmp/alter-source
 
-      - name: Copy ALTER project and workflows
+      - name: Copy ALTER project
         run: |
           rm -rf ALTER
           cp -R /tmp/alter-source/ALTER ./ALTER
-          mkdir -p .github/workflows
-          cp /tmp/alter-source/.github/workflows/alter-*.yml .github/workflows/
 
-          find ALTER .github/workflows -type f -print0 | xargs -0 sed -i 's/tryzubtrz\/ai/tryzubtrz\/agent/g'
-          find ALTER .github/workflows -type f -print0 | xargs -0 sed -i 's/alter-foundation/main/g'
+          # Adapt repository/branch references inside the product source only.
+          find ALTER -type f -print0 | xargs -0 sed -i 's/tryzubtrz\/ai/tryzubtrz\/agent/g'
+          find ALTER -type f -print0 | xargs -0 sed -i 's/alter-foundation/main/g'
 
           cat > README.md <<'EOF'
           # ALTER Agent
@@ -52,7 +51,7 @@ jobs:
         run: |
           git config user.name "ALTER Cloud Migration"
           git config user.email "actions@users.noreply.github.com"
-          git add -A
+          git add ALTER README.md
           if git diff --cached --quiet; then
             echo "No migration changes to commit."
           else
