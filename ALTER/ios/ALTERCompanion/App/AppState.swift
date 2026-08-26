@@ -18,33 +18,41 @@ final class AppState {
         var title: String
         var progress: Double
         var completedSteps: Int
+        var totalSteps: Int
         var nextStep: String
+        var surface: String
 
         init(
             id: UUID = UUID(),
             title: String,
             progress: Double,
             completedSteps: Int,
-            nextStep: String
+            totalSteps: Int,
+            nextStep: String,
+            surface: String
         ) {
             self.id = id
             self.title = title
             self.progress = progress
             self.completedSteps = completedSteps
+            self.totalSteps = totalSteps
             self.nextStep = nextStep
+            self.surface = surface
         }
     }
 
     var status: AgentStatus = .executing
     var activeTask = ActiveTask(
-        title: "Будую основу ALTER",
-        progress: 0.36,
-        completedSteps: 3,
-        nextStep: "Cockpit + iOS companion"
+        title: "Публікація 30-секундного відео",
+        progress: 0.67,
+        completedSteps: 6,
+        totalSteps: 9,
+        nextStep: "Погодити опис і хештеги",
+        surface: "Браузер"
     )
     var pendingApprovals = 1
     var composerText = ""
-    var taskMode = "Звичайно"
+    var taskMode = "AUTO"
 
     func submitComposer() {
         let trimmed = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
