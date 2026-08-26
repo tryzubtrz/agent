@@ -420,8 +420,8 @@ def _audit(
     audit_store.write(
         workspace_id=principal.workspace_id,
         task_id=task_id,
-        actor_type="owner",
-        actor_id=str(principal.user_id),
+        actor_type=principal.actor_role,
+        actor_id=principal.actor_id,
         event_type=event_type,
         payload=payload,
     )
