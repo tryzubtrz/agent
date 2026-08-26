@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import OwnerGate from "@/components/OwnerGate";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -26,7 +27,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="uk">
-      <body>{children}</body>
+      <body><OwnerGate>{children}</OwnerGate></body>
     </html>
   );
 }
