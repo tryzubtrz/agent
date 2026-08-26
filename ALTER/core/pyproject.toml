@@ -10,12 +10,12 @@ requires-python = ">=3.12"
 dependencies = [
   "cryptography>=43,<47",
   "fastapi>=0.115,<1",
-  "openpyxl>=3.1,<4",
   "pydantic>=2.9,<3",
   "psycopg[binary]>=3.2,<4",
+  "uvicorn>=0.30,<1",
   "pypdf>=5,<7",
   "python-docx>=1.1,<2",
-  "uvicorn>=0.30,<1"
+  "openpyxl>=3.1,<4"
 ]
 
 [project.optional-dependencies]
@@ -32,4 +32,4 @@ pythonpath = ["."]
 packages = ["alter_core"]
 
 [tool.vercel]
-entrypoint = "alter_core.api:app"
+entrypoint = "alter_core.main:app"
