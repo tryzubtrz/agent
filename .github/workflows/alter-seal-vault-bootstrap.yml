@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - 'ALTER/core/alter_core/bootstrap_public_key.json'
+      - '.github/workflows/alter-seal-vault-bootstrap.yml'
 
 permissions:
   contents: write
@@ -18,7 +18,7 @@ concurrency:
 jobs:
   seal:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 8
     steps:
       - name: Verify source credential exists
         env:
@@ -34,6 +34,25 @@ jobs:
 
       - name: Install crypto dependency
         run: python -m pip install --disable-pip-version-check 'cryptography>=43,<47'
+
+      - name: Fetch ALTER public sealing key
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
+
+          url = 'https://alter-app-three.vercel.app/api/vault/bootstrap/public-key'
+          request = urllib.request.Request(url, headers={'User-Agent': 'ALTER-GitHub-Bootstrap/1.0'})
+          with urllib.request.urlopen(request, timeout=20) as response:
+              record = json.loads(response.read().decode('utf-8'))
+          if record.get('version') != 1 or record.get('algorithm') != 'X25519-HKDF-SHA256+A256GCM':
+              raise SystemExit('Unexpected ALTER public-key response.')
+          if record.get('value_exposed') is not False:
+              raise SystemExit('ALTER public-key endpoint violated no-secret contract.')
+          Path('/tmp/alter-public-key.json').write_text(json.dumps(record), encoding='utf-8')
+          print('Fetched ALTER public sealing key; no private material was returned.')
+          PY
 
       - name: Seal Botpress credential
         env:
@@ -58,12 +77,7 @@ jobs:
               return base64.urlsafe_b64encode(value).decode('ascii')
 
           alias = 'vault:botpress_runtime'
-          key_path = Path('ALTER/core/alter_core/bootstrap_public_key.json')
-          out_path = Path('ALTER/core/alter_core/bootstrap_vault.json')
-          public_record = json.loads(key_path.read_text(encoding='utf-8'))
-          if public_record.get('version') != 1:
-              raise SystemExit('Unsupported ALTER bootstrap public key version.')
-
+          public_record = json.loads(Path('/tmp/alter-public-key.json').read_text(encoding='utf-8'))
           recipient = X25519PublicKey.from_public_bytes(dec(public_record['public_key']))
           ephemeral = X25519PrivateKey.generate()
           shared = ephemeral.exchange(recipient)
@@ -75,26 +89,17 @@ jobs:
           ).derive(shared)
           nonce = os.urandom(12)
           aad = f'1:{alias}'.encode('utf-8')
-          ciphertext = AESGCM(wrap_key).encrypt(
-              nonce,
-              os.environ['BOTPRESS_PAT'].encode('utf-8'),
-              aad,
-          )
+          ciphertext = AESGCM(wrap_key).encrypt(nonce, os.environ['BOTPRESS_PAT'].encode('utf-8'), aad)
           envelope = {
               'version': 1,
               'algorithm': 'X25519-HKDF-SHA256+A256GCM',
               'alias': alias,
-              'ephemeral_public_key': enc(
-                  ephemeral.public_key().public_bytes(
-                      encoding=serialization.Encoding.Raw,
-                      format=serialization.PublicFormat.Raw,
-                  )
-              ),
+              'ephemeral_public_key': enc(ephemeral.public_key().public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)),
               'nonce': enc(nonce),
               'ciphertext': enc(ciphertext),
           }
-          out_path.write_text(json.dumps(envelope, indent=2) + '\n', encoding='utf-8')
-          print('Botpress credential sealed for ALTER; plaintext was not printed.')
+          Path('ALTER/core/alter_core/bootstrap_vault.json').write_text(json.dumps(envelope, indent=2) + '\n', encoding='utf-8')
+          print('Botpress credential sealed for ALTER; plaintext was never printed or committed.')
           PY
 
       - name: Commit sealed envelope
