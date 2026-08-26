@@ -26,3 +26,6 @@ pythonpath = ["."]
 
 [tool.hatch.build.targets.wheel]
 packages = ["alter_core"]
+
+[tool.vercel]
+entrypoint = "alter_core.api:app"
