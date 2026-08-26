@@ -2,7 +2,7 @@
 
 ALTER is a mobile-first personal AI control plane and digital twin.
 
-This branch starts the implementation from the product specification:
+Current implementation foundation includes:
 
 - mobile-first PWA cockpit for iPhone and desktop;
 - stateful task orchestration with human-in-the-loop checkpoints;
@@ -10,15 +10,18 @@ This branch starts the implementation from the product specification:
 - Vault aliases: models and prompts never receive raw secrets;
 - Profile / World / Episodes memory layers;
 - Tasks, approvals, audit events and artifacts;
-- isolated Browser and Android execution surfaces;
-- model registry and routing;
+- isolated Browser and Android execution surfaces as planned executors;
+- model registry and routing foundation;
 - connectors with least-privilege scopes;
-- optional native iOS companion.
+- optional native iOS companion foundation;
+- Botpress ADK specialist with phone-only deployment through GitHub Actions.
 
 ## Repository layout
 
 ```text
 ALTER/
+  botpress/        Botpress ADK specialist and cloud deployment
+  core/            policy/orchestration API core
   docs/            architecture and security model
   web/             PWA cockpit
   ios/             SwiftUI companion foundation
@@ -43,6 +46,6 @@ ALTER/
 - human-only authentication steps such as MFA, passkeys and CAPTCHA are never bypassed;
 - audit events are append-oriented and exclude secret values.
 
-## Status
+## Botpress status
 
-Foundation branch created. Botpress integration is pending account reconnection; the product architecture does not depend on Botpress and can use it as one specialist agent surface after connection is restored.
+ALTER now lives in the private `tryzubtrz/agent` repository on `main`. GitHub Actions secret `BOTPRESS_PAT` has been presence-checked without exposing its value. The Botpress deployment workflow targets workspace `wkspace_01M0XTFXYMFEDGHEEKT710G22P` and bot `64f3490a-183a-47c5-b825-97210771822f`.
