@@ -13,6 +13,7 @@ from .connector_gateway_api import router as connector_gateway_router
 from .conversation_api import router as conversation_router
 from .document_api import router as document_router
 from .market_api import router as market_router
+from .media_api import router as media_router
 from .memory_admin_api import router as memory_admin_router
 from .model_api import router as model_router
 from .productivity_api import router as productivity_router
@@ -28,6 +29,7 @@ for router in (
     conversation_router,
     document_router,
     market_router,
+    media_router,
     memory_admin_router,
     model_router,
     productivity_router,
