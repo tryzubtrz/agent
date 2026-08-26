@@ -48,6 +48,24 @@ def test_conversation_redacts_secret_before_persistence(monkeypatch):
     assert "REDACTED" in serialized
 
 
+def test_redactor_covers_database_urls_jwts_and_private_keys():
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbHRlci1vd25lciJ9.signature0123456789"
+    private_key = "-----BEGIN PRIVATE KEY-----\nVERYSECRETKEYMATERIAL\n-----END PRIVATE KEY-----"
+    source = (
+        "DATABASE_URL=postgresql://alter:super-secret-db-password@db.example.com/neondb\n"
+        f"token={jwt}\n{private_key}"
+    )
+
+    safe, changed = conversation_api._redact(source)
+    assert changed is True
+    assert "super-secret-db-password" not in safe
+    assert jwt not in safe
+    assert "VERYSECRETKEYMATERIAL" not in safe
+    assert "[REDACTED]" in safe
+    assert "[REDACTED_JWT]" in safe
+    assert "[REDACTED_PRIVATE_KEY]" in safe
+
+
 def test_conversation_ai_is_fail_closed_without_runtime_credential(monkeypatch):
     token = configure_owner(monkeypatch)
     monkeypatch.setattr(
