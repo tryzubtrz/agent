@@ -32,6 +32,18 @@ jobs:
             core.setSecret(token)
             require('fs').writeFileSync('/tmp/alter-oidc', token, { mode: 0o600 })
 
+      - name: Report safe OIDC claims
+        run: |
+          python - <<'PY'
+          import base64, json
+          token = open('/tmp/alter-oidc', encoding='utf-8').read().strip()
+          payload = token.split('.')[1]
+          payload += '=' * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload).decode('utf-8'))
+          safe = {key: claims.get(key) for key in ('iss','aud','repository','ref','workflow_ref','event_name','sub')}
+          print(json.dumps(safe, sort_keys=True))
+          PY
+
       - name: Run due ALTER automations
         run: |
           TOKEN="$(cat /tmp/alter-oidc)"
