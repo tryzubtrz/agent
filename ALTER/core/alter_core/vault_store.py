@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 from dataclasses import dataclass
+from importlib import resources
 from uuid import UUID
 
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .persistence import PostgresMemoryStore
 
 _VAULT_NAMESPACE = "_vault.runtime"
 _VERSION = 1
+_BOOTSTRAP_FILE = "bootstrap_vault.json"
 
 
 class VaultUnavailableError(RuntimeError):
@@ -58,6 +64,34 @@ def _key(context: VaultContext) -> bytes:
     return hashlib.sha256(material).digest()
 
 
+def _bootstrap_private_key(context: VaultContext) -> X25519PrivateKey:
+    seed = hashlib.sha256(
+        b"ALTER-Vault-Bootstrap-X25519-v1\x00"
+        + context.workspace_id.bytes
+        + b"\x00"
+        + context.api_token.encode("utf-8")
+    ).digest()
+    return X25519PrivateKey.from_private_bytes(seed)
+
+
+def bootstrap_public_key() -> str:
+    context = _context_from_env()
+    public = _bootstrap_private_key(context).public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return _encode(public)
+
+
+def _bootstrap_wrap_key(context: VaultContext, alias: str, shared_secret: bytes) -> bytes:
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=hashlib.sha256(context.workspace_id.bytes).digest(),
+        info=f"ALTER-Bootstrap-v1:{alias}".encode("utf-8"),
+    ).derive(shared_secret)
+
+
 def _aad(context: VaultContext, alias: str) -> bytes:
     return f"{_VERSION}:{context.workspace_id}:{alias}".encode("utf-8")
 
@@ -95,8 +129,7 @@ def store_secret(alias: str, secret: str) -> None:
     )
 
 
-def load_secret(alias: str) -> str | None:
-    context = _context_from_env()
+def _load_persisted_secret(context: VaultContext, alias: str) -> str | None:
     rows = PostgresMemoryStore(context.database_url).list_for_user(
         workspace_id=context.workspace_id,
         user_id=context.user_id,
@@ -118,8 +151,49 @@ def load_secret(alias: str) -> str | None:
             _aad(context, alias),
         )
         return plaintext.decode("utf-8")
-    except Exception as exc:  # provider details must never reach callers
+    except Exception as exc:
         raise VaultIntegrityError("Vault secret could not be decrypted.") from exc
+
+
+def _load_bootstrap_secret(context: VaultContext, alias: str) -> str | None:
+    try:
+        candidate = resources.files("alter_core").joinpath(_BOOTSTRAP_FILE)
+        if not candidate.is_file():
+            return None
+        envelope = json.loads(candidate.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(envelope, dict) or envelope.get("alias") != alias or envelope.get("version") != _VERSION:
+        return None
+    try:
+        ephemeral = X25519PublicKey.from_public_bytes(_decode(str(envelope["ephemeral_public_key"])))
+        shared = _bootstrap_private_key(context).exchange(ephemeral)
+        wrap_key = _bootstrap_wrap_key(context, alias, shared)
+        nonce = _decode(str(envelope["nonce"]))
+        ciphertext = _decode(str(envelope["ciphertext"]))
+        plaintext = AESGCM(wrap_key).decrypt(nonce, ciphertext, _aad(context, alias))
+        return plaintext.decode("utf-8")
+    except Exception as exc:
+        raise VaultIntegrityError("Bootstrap vault envelope could not be decrypted.") from exc
+
+
+def load_secret(alias: str) -> str | None:
+    context = _context_from_env()
+    persisted = _load_persisted_secret(context, alias)
+    if persisted:
+        return persisted
+
+    bootstrapped = _load_bootstrap_secret(context, alias)
+    if not bootstrapped:
+        return None
+
+    # Best-effort migration from the sealed deployment envelope into Neon.
+    # Failure to persist must not reveal or log the secret value.
+    try:
+        store_secret(alias, bootstrapped)
+    except Exception:
+        pass
+    return bootstrapped
 
 
 def secret_configured(alias: str) -> bool:
