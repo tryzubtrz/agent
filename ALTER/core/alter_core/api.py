@@ -24,8 +24,9 @@ from .persistence import (
     PostgresTaskStore,
 )
 from .policy_store import InMemoryPolicyStore
+from .secret_safety import contains_high_confidence_secret
 
-app = FastAPI(title="ALTER Core", version="0.4.0")
+app = FastAPI(title="ALTER Core", version="0.5.0")
 
 _database_url = os.getenv("DATABASE_URL")
 if _database_url:
@@ -98,7 +99,7 @@ def health() -> dict[str, str]:
     return {
         "service": "alter-core",
         "status": "ok",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "storage": STORAGE_MODE,
     }
 
@@ -239,6 +240,11 @@ def upsert_memory(
     body: MemoryUpsertBody,
     principal: Principal = Depends(require_owner),
 ) -> dict[str, Any]:
+    if body.namespace != "_vault.runtime" and contains_high_confidence_secret(body.value):
+        raise HTTPException(
+            status_code=422,
+            detail="Secret-like content is not allowed in ordinary memory. Use ALTER Vault.",
+        )
     if memory_store is not None:
         saved = memory_store.upsert(
             workspace_id=principal.workspace_id,
