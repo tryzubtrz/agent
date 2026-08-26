@@ -1,0 +1,110 @@
+name: ALTER Seal Vault Bootstrap
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'ALTER/core/alter_core/bootstrap_public_key.json'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: alter-seal-vault-bootstrap
+  cancel-in-progress: true
+
+jobs:
+  seal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Verify source credential exists
+        env:
+          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+        run: |
+          if [ -z "$BOTPRESS_PAT" ]; then
+            echo "BOTPRESS_PAT is not configured; sealing cannot continue."
+            exit 3
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install crypto dependency
+        run: python -m pip install --disable-pip-version-check 'cryptography>=43,<47'
+
+      - name: Seal Botpress credential
+        env:
+          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+        run: |
+          python - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          from cryptography.hazmat.primitives import hashes, serialization
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+          def dec(value: str) -> bytes:
+              return base64.urlsafe_b64decode(value.encode('ascii'))
+
+          def enc(value: bytes) -> str:
+              return base64.urlsafe_b64encode(value).decode('ascii')
+
+          alias = 'vault:botpress_runtime'
+          key_path = Path('ALTER/core/alter_core/bootstrap_public_key.json')
+          out_path = Path('ALTER/core/alter_core/bootstrap_vault.json')
+          public_record = json.loads(key_path.read_text(encoding='utf-8'))
+          if public_record.get('version') != 1:
+              raise SystemExit('Unsupported ALTER bootstrap public key version.')
+
+          recipient = X25519PublicKey.from_public_bytes(dec(public_record['public_key']))
+          ephemeral = X25519PrivateKey.generate()
+          shared = ephemeral.exchange(recipient)
+          wrap_key = HKDF(
+              algorithm=hashes.SHA256(),
+              length=32,
+              salt=hashlib.sha256(b'ALTER-Bootstrap-v1').digest(),
+              info=f'ALTER-Bootstrap-v1:{alias}'.encode('utf-8'),
+          ).derive(shared)
+          nonce = os.urandom(12)
+          aad = f'1:{alias}'.encode('utf-8')
+          ciphertext = AESGCM(wrap_key).encrypt(
+              nonce,
+              os.environ['BOTPRESS_PAT'].encode('utf-8'),
+              aad,
+          )
+          envelope = {
+              'version': 1,
+              'algorithm': 'X25519-HKDF-SHA256+A256GCM',
+              'alias': alias,
+              'ephemeral_public_key': enc(
+                  ephemeral.public_key().public_bytes(
+                      encoding=serialization.Encoding.Raw,
+                      format=serialization.PublicFormat.Raw,
+                  )
+              ),
+              'nonce': enc(nonce),
+              'ciphertext': enc(ciphertext),
+          }
+          out_path.write_text(json.dumps(envelope, indent=2) + '\n', encoding='utf-8')
+          print('Botpress credential sealed for ALTER; plaintext was not printed.')
+          PY
+
+      - name: Commit sealed envelope
+        run: |
+          if git diff --quiet -- ALTER/core/alter_core/bootstrap_vault.json && git ls-files --error-unmatch ALTER/core/alter_core/bootstrap_vault.json >/dev/null 2>&1; then
+            echo "Sealed envelope is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ALTER/core/alter_core/bootstrap_vault.json
+          git commit -m "chore: refresh sealed ALTER runtime credential"
+          git push
