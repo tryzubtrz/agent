@@ -31,6 +31,8 @@ class BotpressGateway:
     not expose the Admin API and never includes secrets in raised errors.
     """
 
+    DEFAULT_BOT_ID = "64f3490a-183a-47c5-b825-97210771822f"
+
     def __init__(
         self,
         *,
@@ -40,7 +42,8 @@ class BotpressGateway:
         timeout_seconds: float = 30.0,
     ) -> None:
         self.token = (token if token is not None else os.getenv("BOTPRESS_RUNTIME_TOKEN", "")).strip()
-        self.bot_id = (bot_id if bot_id is not None else os.getenv("BOTPRESS_BOT_ID", "")).strip()
+        configured_bot_id = bot_id if bot_id is not None else os.getenv("BOTPRESS_BOT_ID", self.DEFAULT_BOT_ID)
+        self.bot_id = configured_bot_id.strip()
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
 
