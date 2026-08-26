@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Protocol
 from uuid import UUID
 
 from .models import (
@@ -21,8 +22,14 @@ class ApprovalMismatchError(ValueError):
     pass
 
 
+class TaskStore(Protocol):
+    def save(self, task: Task) -> Task: ...
+
+    def get(self, task_id: UUID) -> Task: ...
+
+
 class InMemoryTaskStore:
-    """MVP storage only. Replace with durable PostgreSQL/workflow persistence."""
+    """Local/test fallback. Production should use a durable TaskStore."""
 
     def __init__(self) -> None:
         self._tasks: dict[UUID, Task] = {}
@@ -43,7 +50,7 @@ class TaskOrchestrator:
     def __init__(
         self,
         *,
-        store: InMemoryTaskStore | None = None,
+        store: TaskStore | None = None,
         policy_engine: PolicyEngine | None = None,
     ) -> None:
         self.store = store or InMemoryTaskStore()
