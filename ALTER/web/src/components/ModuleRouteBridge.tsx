@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
 const routes: Record<string, string> = {
+  "ALTER": "/chat",
   "Файли": "/files",
   "Сховище": "/vault",
   "Моделі": "/models",
@@ -16,7 +17,16 @@ export default function ModuleRouteBridge() {
   useEffect(() => {
     function onClick(event: MouseEvent) {
       const target = event.target as HTMLElement | null;
-      const button = target?.closest("button") as HTMLButtonElement | null;
+      if (!target) return;
+
+      if (target.closest(".statusRow")) {
+        event.preventDefault();
+        event.stopPropagation();
+        router.push("/status");
+        return;
+      }
+
+      const button = target.closest("button") as HTMLButtonElement | null;
       if (!button) return;
 
       const isQuickModule = Boolean(button.closest(".quickModules"));
