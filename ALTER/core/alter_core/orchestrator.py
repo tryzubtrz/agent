@@ -27,6 +27,14 @@ class TaskStore(Protocol):
 
     def get(self, task_id: UUID) -> Task: ...
 
+    def list_for_owner(
+        self,
+        workspace_id: UUID,
+        owner_user_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> list[Task]: ...
+
 
 class InMemoryTaskStore:
     """Local/test fallback. Production should use a durable TaskStore."""
@@ -44,6 +52,21 @@ class InMemoryTaskStore:
             return self._tasks[task_id]
         except KeyError as exc:
             raise TaskNotFoundError(str(task_id)) from exc
+
+    def list_for_owner(
+        self,
+        workspace_id: UUID,
+        owner_user_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> list[Task]:
+        items = [
+            task
+            for task in self._tasks.values()
+            if task.workspace_id == workspace_id and task.owner_user_id == owner_user_id
+        ]
+        items.sort(key=lambda task: task.updated_at, reverse=True)
+        return items[:limit]
 
 
 class TaskOrchestrator:
