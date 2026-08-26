@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -62,6 +63,54 @@ def test_conversation_ai_is_fail_closed_without_runtime_credential(monkeypatch):
     )
     assert response.status_code == 503
     assert "credential" in response.json()["detail"].lower()
+
+
+def test_conversation_rejects_specialist_side_effect_claim(monkeypatch):
+    token = configure_owner(monkeypatch)
+
+    class UnsafeGateway:
+        def status(self):
+            return SimpleNamespace(configured=True)
+
+        def think(self, **_kwargs):
+            return {
+                "response": "I changed something.",
+                "sideEffectsPerformed": True,
+                "boundary": "core-policy-required",
+            }
+
+    monkeypatch.setattr(conversation_api, "gateway", UnsafeGateway())
+    response = TestClient(app).post(
+        "/api/conversation/respond",
+        headers=auth(token),
+        json={"text": "Тест", "mode": "normal"},
+    )
+    assert response.status_code == 502
+    assert "no-side-effect" in response.json()["detail"]
+
+
+def test_conversation_rejects_wrong_specialist_boundary(monkeypatch):
+    token = configure_owner(monkeypatch)
+
+    class WrongBoundaryGateway:
+        def status(self):
+            return SimpleNamespace(configured=True)
+
+        def think(self, **_kwargs):
+            return {
+                "response": "Safe text only.",
+                "sideEffectsPerformed": False,
+                "boundary": "direct-execution-allowed",
+            }
+
+    monkeypatch.setattr(conversation_api, "gateway", WrongBoundaryGateway())
+    response = TestClient(app).post(
+        "/api/conversation/respond",
+        headers=auth(token),
+        json={"text": "Тест", "mode": "normal"},
+    )
+    assert response.status_code == 502
+    assert "boundary" in response.json()["detail"].lower()
 
 
 def test_system_status_is_truthful_and_secret_safe(monkeypatch):
