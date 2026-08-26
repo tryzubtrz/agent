@@ -12,35 +12,36 @@ const routes: Record<string, string> = {
   "Люди": "/people",
 };
 
+const deferred = new Set(["Браузер", "Android"]);
+
 export default function ModuleRouteBridge() {
   const router = useRouter();
 
   useEffect(() => {
+    document.querySelectorAll<HTMLButtonElement>(".quickModules button").forEach((button) => {
+      if (deferred.has((button.textContent || "").trim())) {
+        button.style.display = "none";
+        button.setAttribute("aria-hidden", "true");
+        button.tabIndex = -1;
+      }
+    });
+
     function onClick(event: MouseEvent) {
       const target = event.target as HTMLElement | null;
       if (!target) return;
-
       if (target.closest(".statusRow")) {
-        event.preventDefault();
-        event.stopPropagation();
-        router.push("/status");
-        return;
+        event.preventDefault(); event.stopPropagation(); router.push("/status"); return;
       }
-
       const button = target.closest("button") as HTMLButtonElement | null;
       if (!button) return;
-
       const isQuickModule = Boolean(button.closest(".quickModules"));
       const isFilesShortcut = button.getAttribute("aria-label") === "Відкрити файли";
       if (!isQuickModule && !isFilesShortcut) return;
-
       const label = isFilesShortcut ? "Файли" : (button.textContent || "").trim();
+      if (deferred.has(label)) { event.preventDefault(); event.stopPropagation(); return; }
       const href = routes[label];
       if (!href) return;
-
-      event.preventDefault();
-      event.stopPropagation();
-      router.push(href);
+      event.preventDefault(); event.stopPropagation(); router.push(href);
     }
 
     document.addEventListener("click", onClick, true);
