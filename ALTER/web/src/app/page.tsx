@@ -26,6 +26,7 @@ import { type ComponentType, type FormEvent, useCallback, useEffect, useMemo, us
 type Screen = "home" | "tasks" | "rules" | "memory" | "audit" | "connectors" | "browser" | "android" | "models" | "vault" | "people" | "files";
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
 type TaskStatus = "intake" | "planning" | "ready" | "executing" | "awaiting_approval" | "awaiting_login" | "awaiting_mfa" | "blocked_by_rule" | "recovering" | "paused" | "done" | "failed";
+type ChatMode = "chat" | "task";
 
 type Task = {
   id: string;
@@ -76,6 +77,14 @@ type ConnectorState = {
 };
 
 type Health = { service: string; status: string; version: string; storage: string };
+type AgentStatus = {
+  provider: string;
+  configured: boolean;
+  bot_id_configured: boolean;
+  credential_configured: boolean;
+  action: string;
+  side_effect_boundary: string;
+};
 type Module = { id: Screen; label: string; icon: Icon };
 
 const modules: Module[] = [
@@ -128,12 +137,12 @@ function Logo() {
   return <div className="alterLogo" aria-label="ALTER">A</div>;
 }
 
-function Header({ title }: { title?: string }) {
+function Header({ title, onNotifications }: { title?: string; onNotifications: () => void }) {
   return (
     <header className="appHeader">
       <div className="brandWord">ALTER</div>
       {title ? <div className="screenTitleCompact"><span>{title}</span></div> : <Logo />}
-      <button className="iconButton notification" aria-label="Сповіщення"><Bell size={19} /><i /></button>
+      <button type="button" className="iconButton notification" aria-label="Відкрити хронологію" onClick={onNotifications}><Bell size={19} /><i /></button>
     </header>
   );
 }
@@ -161,7 +170,7 @@ function connectorLabel(status: ConnectorState["status"]): string {
   return labels[status];
 }
 
-function HonestPlaceholder({ title, icon: Icon, text }: { title: string; icon: Icon; text: string }) {
+function HonestPlaceholder({ title, icon: Icon, text, onConnectors }: { title: string; icon: Icon; text: string; onConnectors: () => void }) {
   return (
     <section className="glassPanel" style={{ borderRadius: 22, padding: 20 }}>
       <div style={{ display: "flex", gap: 13, alignItems: "center" }}>
@@ -171,7 +180,10 @@ function HonestPlaceholder({ title, icon: Icon, text }: { title: string; icon: I
           <p style={{ color: "var(--muted)", margin: "6px 0 0", lineHeight: 1.5 }}>{text}</p>
         </div>
       </div>
-      <div style={{ marginTop: 16 }}><StatusChip tone="amber">Ще не підключено до runtime</StatusChip></div>
+      <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <StatusChip tone="amber">Ще не підключено до runtime</StatusChip>
+        <button type="button" className="wideAction" onClick={onConnectors}>Відкрити конектори</button>
+      </div>
     </section>
   );
 }
@@ -179,6 +191,7 @@ function HonestPlaceholder({ title, icon: Icon, text }: { title: string; icon: I
 export default function Page() {
   const [screen, setScreen] = useState<Screen>("home");
   const [health, setHealth] = useState<Health | null>(null);
+  const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [policies, setPolicies] = useState<PolicyRule[]>([]);
   const [memory, setMemory] = useState<MemoryItem[]>([]);
@@ -188,6 +201,7 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null);
   const [command, setCommand] = useState("");
   const [sending, setSending] = useState(false);
+  const [chatMode, setChatMode] = useState<ChatMode>("chat");
   const [messages, setMessages] = useState<Array<{ role: "user" | "agent"; text: string }>>([]);
 
   const refresh = useCallback(async () => {
@@ -207,6 +221,11 @@ export default function Page() {
       setMemory(m);
       setAudit(a);
       setConnectors(c);
+      try {
+        setAgentStatus(await core<AgentStatus>("/agent/status"));
+      } catch {
+        setAgentStatus(null);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не вдалося зʼєднатися з ALTER Core");
     } finally {
@@ -227,29 +246,52 @@ export default function Page() {
     setSending(true);
     setMessages((items) => [...items, { role: "user", text: objective }]);
     setCommand("");
+
     try {
+      if (chatMode === "chat") {
+        if (!agentStatus?.configured) {
+          setMessages((items) => [...items, {
+            role: "agent",
+            text: "Я вже налаштований говорити нормально й по-дружньому, але мій Botpress-мозок ще не має runtime credential у Core. Тому зараз я не буду удавати, що відповів AI. Перемкнися на «Задача», якщо хочеш щось записати на виконання — а режим розмови запрацює після підключення мозку.",
+          }]);
+          return;
+        }
+
+        const result = await core<{ response: string }>("/agent/think", {
+          method: "POST",
+          body: JSON.stringify({ objective, context: "Conversation from ALTER web cockpit", mode: "normal" }),
+        });
+        setMessages((items) => [...items, { role: "agent", text: result.response }]);
+        return;
+      }
+
       const task = await core<Task>("/tasks", {
         method: "POST",
         body: JSON.stringify({ objective, acceptance_criteria: [] }),
       });
-      setMessages((items) => [...items, { role: "agent", text: `Задачу записано в Core/Postgres. Статус: ${statusLabel[task.status]}. ID: ${task.id.slice(0, 8)}…` }]);
+      setMessages((items) => [...items, {
+        role: "agent",
+        text: `Є. Я зберіг це як реальну задачу. Зараз статус — «${statusLabel[task.status]}».`,
+      }]);
       await refresh();
     } catch (e) {
-      setMessages((items) => [...items, { role: "agent", text: `Не вдалося створити задачу: ${e instanceof Error ? e.message : "невідома помилка"}` }]);
+      setMessages((items) => [...items, { role: "agent", text: `Не вийшло виконати запит: ${e instanceof Error ? e.message : "невідома помилка"}` }]);
     } finally {
       setSending(false);
     }
   }
 
+  const openConnectors = () => setScreen("connectors");
+
   return (
     <main className="appShell">
       <div className="ambient one" /><div className="ambient two" />
       <div className="appSurface">
-        <Header title={screen === "home" ? undefined : modules.find((m) => m.id === screen)?.label} />
+        <Header title={screen === "home" ? undefined : modules.find((m) => m.id === screen)?.label} onNotifications={() => setScreen("audit")} />
 
         <div className="quickModules">
           {modules.map(({ id, label, icon: Icon }) => (
-            <button key={id} onClick={() => setScreen(id)} style={screen === id ? { borderColor: "var(--line-strong)", color: "#d8d3ff" } : undefined}>
+            <button type="button" key={id} onClick={() => setScreen(id)} style={screen === id ? { borderColor: "var(--line-strong)", color: "#d8d3ff" } : undefined}>
               <Icon size={14} /> {label}
             </button>
           ))}
@@ -267,6 +309,7 @@ export default function Page() {
             <div className="statusRow">
               <StatusChip tone={health?.status === "ok" ? "green" : "amber"}>{health?.status === "ok" ? "Core online" : loading ? "Перевірка Core…" : "Core offline"}</StatusChip>
               <span className="microPill"><Database size={13} /> {health?.storage === "postgres" ? "Postgres" : health?.storage ?? "—"}</span>
+              <span className="microPill"><Brain size={13} /> {agentStatus?.configured ? "AI connected" : "AI waiting"}</span>
               <span className="microPill"><ListChecks size={13} /> {activeTasks.length} активних</span>
               <span className="microPill"><Link2 size={13} /> {connectedCount} connected</span>
             </div>
@@ -277,7 +320,7 @@ export default function Page() {
                   <div className="eyebrow">ПОТОЧНА ЗАДАЧА · LIVE DATA</div>
                   <h1>{currentTask?.objective ?? "Немає активних задач"}</h1>
                 </div>
-                <button className="orbPlay" onClick={() => setScreen("tasks")}><ListChecks size={23} /></button>
+                <button type="button" className="orbPlay" onClick={() => setScreen("tasks")} aria-label="Відкрити задачі"><ListChecks size={23} /></button>
               </div>
               {currentTask && (
                 <>
@@ -292,7 +335,7 @@ export default function Page() {
             </section>
 
             <section className="chatPanel glassPanel" style={{ marginTop: 16 }}>
-              <div className="chatMessage agent"><Logo /><div><small>ALTER · LIVE</small><p>Core підключений до Neon Postgres. Команди нижче створюють справжні задачі, а не локальну імітацію.</p></div></div>
+              <div className="chatMessage agent"><Logo /><div><small>ALTER · LIVE</small><p>Привіт. Можеш говорити зі мною нормально — як з другом. Якщо хочеш щось доручити, перемкнись на «Задача». Я не буду змішувати звичайну розмову з командами на виконання.</p></div></div>
               {messages.map((m, i) => (
                 <div className={`chatMessage ${m.role}`} key={`${m.role}-${i}`}>
                   {m.role === "agent" ? <Logo /> : <div className="userAvatar">В</div>}
@@ -302,11 +345,15 @@ export default function Page() {
             </section>
 
             <form className="commandComposer" onSubmit={submitCommand}>
-              <button type="button" className="plusButton" aria-label="Додати"><Plus size={22} /></button>
-              <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="Створити задачу для ALTER…" disabled={sending} />
+              <button type="button" className="plusButton" aria-label="Відкрити файли" onClick={() => setScreen("files")}><Plus size={22} /></button>
+              <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder={chatMode === "chat" ? "Напиши ALTER як другу…" : "Що потрібно зробити?"} disabled={sending} />
               <span />
               <button className="sendButton" disabled={sending} aria-label="Надіслати"><Send size={18} /></button>
-              <div className="composerModes"><button type="button">Core</button><button type="button">Postgres</button><button type="button">Policy first</button></div>
+              <div className="composerModes">
+                <button type="button" onClick={() => setChatMode("chat")} style={chatMode === "chat" ? { opacity: 1, fontWeight: 700 } : { opacity: .6 }}>Розмова</button>
+                <button type="button" onClick={() => setChatMode("task")} style={chatMode === "task" ? { opacity: 1, fontWeight: 700 } : { opacity: .6 }}>Задача</button>
+                <button type="button" onClick={() => setScreen("rules")}>Правила</button>
+              </div>
             </form>
           </>
         )}
@@ -316,12 +363,12 @@ export default function Page() {
         {screen === "memory" && <MemoryScreen memory={memory} refresh={refresh} />}
         {screen === "audit" && <AuditScreen events={audit} />}
         {screen === "connectors" && <ConnectorsScreen connectors={connectors} />}
-        {screen === "browser" && <HonestPlaceholder title="Браузер" icon={Globe2} text="UI готовий, але remote Playwright/Browser executor ще не підʼєднаний. ALTER не буде показувати фальшиву активну сесію." />}
-        {screen === "android" && <HonestPlaceholder title="Android" icon={Smartphone} text="Ізольований Android executor ще не запущений. Входи, 2FA та CAPTCHA мають залишатися під вашим ручним контролем." />}
-        {screen === "models" && <HonestPlaceholder title="Моделі" icon={Brain} text="Model Router ще не має production registry. Демонстраційні VideoGen/CodeCraft/VisionPro прибрані як неіснуючі runtime-моделі." />}
-        {screen === "vault" && <HonestPlaceholder title="Сховище" icon={KeyRound} text="Vercel secrets уже захищають Core-токен, але окремий ALTER Vault з alias/rotation/audit ще не реалізований." />}
-        {screen === "people" && <HonestPlaceholder title="Люди" icon={Users} text="Production RBAC та запрошення Partner/Guest ще не реалізовані. Поточний Core працює в single-owner режимі." />}
-        {screen === "files" && <HonestPlaceholder title="Файли" icon={Folder} text="Файлове сховище та індексація ще не підʼєднані до Core. Тут не показуються вигадані файли." />}
+        {screen === "browser" && <HonestPlaceholder title="Браузер" icon={Globe2} text="UI відкривається, але remote Playwright/Browser executor ще не підʼєднаний. ALTER не буде показувати фальшиву активну сесію." onConnectors={openConnectors} />}
+        {screen === "android" && <HonestPlaceholder title="Android" icon={Smartphone} text="Ізольований Android executor ще не запущений. Входи, 2FA та CAPTCHA мають залишатися під вашим ручним контролем." onConnectors={openConnectors} />}
+        {screen === "models" && <HonestPlaceholder title="Моделі" icon={Brain} text="Model Router ще не має production registry. Тут не показуються вигадані runtime-моделі." onConnectors={openConnectors} />}
+        {screen === "vault" && <HonestPlaceholder title="Сховище" icon={KeyRound} text="Vercel secrets уже захищають Core-токен, але окремий ALTER Vault з alias/rotation/audit ще не реалізований." onConnectors={openConnectors} />}
+        {screen === "people" && <HonestPlaceholder title="Люди" icon={Users} text="Production RBAC та запрошення Partner/Guest ще не реалізовані. Поточний Core працює в single-owner режимі." onConnectors={openConnectors} />}
+        {screen === "files" && <HonestPlaceholder title="Файли" icon={Folder} text="Файлове сховище та індексація ще не підʼєднані до Core. Кнопка «+» тепер приводить сюди замість мертвого натискання." onConnectors={openConnectors} />}
 
         <nav className="bottomNav" aria-label="Основна навігація">
           {[
@@ -332,7 +379,7 @@ export default function Page() {
             ["rules", "Правила", Shield],
           ].map(([id, label, Icon]) => {
             const C = Icon as Icon;
-            return <button key={id as string} className={screen === id ? "active" : ""} onClick={() => setScreen(id as Screen)}><C size={20} /><span>{label as string}</span></button>;
+            return <button type="button" key={id as string} className={screen === id ? "active" : ""} onClick={() => setScreen(id as Screen)}><C size={20} /><span>{label as string}</span></button>;
           })}
         </nav>
       </div>
@@ -359,8 +406,8 @@ function TasksScreen({ tasks, refresh }: { tasks: Task[]; refresh: () => Promise
             <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><strong>{task.objective}</strong><StatusChip tone={task.status === "failed" || task.status === "blocked_by_rule" ? "red" : task.status === "awaiting_approval" ? "amber" : "green"}>{statusLabel[task.status]}</StatusChip></div>
             <div style={{ color: "var(--muted)", marginTop: 8, fontSize: 12 }}>Крок: {task.current_step ?? "—"}{task.blocker ? ` · ${task.blocker}` : ""}</div>
             <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-              {task.status === "planning" && <button className="wideAction" disabled={busy === task.id} onClick={() => void transition(task, "ready")}>Позначити Ready</button>}
-              {!["done", "failed"].includes(task.status) && <button className="wideAction" disabled={busy === task.id} onClick={() => void transition(task, "complete")}><CheckCircle2 size={15} /> Завершити</button>}
+              {task.status === "planning" && <button type="button" className="wideAction" disabled={busy === task.id} onClick={() => void transition(task, "ready")}>Позначити Ready</button>}
+              {!["done", "failed"].includes(task.status) && <button type="button" className="wideAction" disabled={busy === task.id} onClick={() => void transition(task, "complete")}><CheckCircle2 size={15} /> Завершити</button>}
             </div>
           </article>
         ))}
