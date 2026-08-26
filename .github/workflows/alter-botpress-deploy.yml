@@ -73,6 +73,33 @@ jobs:
         working-directory: ALTER/botpress
         run: npx adk deploy --yes --allow-unconfigured
 
+      - name: Smoke test Botpress Runtime API
+        env:
+          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+        run: |
+          set -euo pipefail
+          HTTP_STATUS=$(curl -sS -o /tmp/botpress-runtime.json -w '%{http_code}' \
+            -H "Authorization: Bearer $BOTPRESS_PAT" \
+            -H "x-bot-id: $BOTPRESS_BOT_ID" \
+            -H "Accept: application/json" \
+            "https://api.botpress.cloud/v1/chat/conversations?sortField=updatedAt&sortDirection=desc")
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "Botpress Runtime API smoke test failed with HTTP $HTTP_STATUS"
+            python - <<'PY'
+          from pathlib import Path
+          text = Path('/tmp/botpress-runtime.json').read_text(errors='replace')
+          print(text[:1000])
+          PY
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path('/tmp/botpress-runtime.json').read_text())
+          conversations = payload.get('conversations', [])
+          print(f"Botpress Runtime API reachable; conversations returned: {len(conversations)}")
+          PY
+
       - name: Report deploy result
         if: always()
         env:
@@ -89,6 +116,7 @@ jobs:
               f"Secret check step: {os.environ.get('AUTH_OUTCOME')}\n"
               'Target workspace: wkspace_01M0XTFXYMFEDGHEEKT710G22P\n'
               'Target bot: 64f3490a-183a-47c5-b825-97210771822f\n'
+              'Runtime API smoke test is part of this deploy job.\n'
               'Unconfigured optional dependencies are allowed to remain inert.'
           )
           print(json.dumps(body))
