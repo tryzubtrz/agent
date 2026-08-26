@@ -3,15 +3,24 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "ALTER",
-  description: "Personal AI control plane",
-  applicationName: "ALTER"
+  description: "Owner-controlled AI control plane",
+  applicationName: "ALTER",
+  manifest: "/manifest.webmanifest",
+  icons: { icon: "/icon.svg", apple: "/icon.svg" },
+  appleWebApp: {
+    capable: true,
+    title: "ALTER",
+    statusBarStyle: "black-translucent"
+  },
+  formatDetection: { telephone: false }
 };
 
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  maximumScale: 1,
   viewportFit: "cover",
-  themeColor: "#08090c"
+  themeColor: "#050608"
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
