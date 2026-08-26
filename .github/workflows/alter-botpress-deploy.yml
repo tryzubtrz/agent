@@ -1,0 +1,78 @@
+name: ALTER Botpress Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'ALTER/botpress/deploy.request'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alter-botpress-production
+  cancel-in-progress: false
+
+env:
+  BOTPRESS_WORKSPACE_ID: wkspace_01M0XTFXYMFEDGHEEKT710G22P
+  BOTPRESS_BOT_ID: 64f3490a-183a-47c5-b825-97210771822f
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Botpress secret
+        id: auth
+        env:
+          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+        run: |
+          if [ -z "$BOTPRESS_PAT" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "BOTPRESS_PAT is not configured yet; deployment is safely skipped."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node
+        if: steps.auth.outputs.configured == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Bun
+        if: steps.auth.outputs.configured == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2.21'
+
+      - name: Install dependencies
+        if: steps.auth.outputs.configured == 'true'
+        working-directory: ALTER/botpress
+        run: npm install --no-audit --no-fund
+
+      - name: Authenticate Botpress ADK
+        if: steps.auth.outputs.configured == 'true'
+        working-directory: ALTER/botpress
+        env:
+          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+        run: npx adk login --token "$BOTPRESS_PAT"
+
+      - name: Link existing Botpress bot
+        if: steps.auth.outputs.configured == 'true'
+        working-directory: ALTER/botpress
+        run: npx adk link --workspace "$BOTPRESS_WORKSPACE_ID" --bot "$BOTPRESS_BOT_ID" --force
+
+      - name: Validate before deploy
+        if: steps.auth.outputs.configured == 'true'
+        working-directory: ALTER/botpress
+        run: npx adk check
+
+      - name: Deploy ALTER to Botpress Cloud
+        if: steps.auth.outputs.configured == 'true'
+        working-directory: ALTER/botpress
+        run: npx adk deploy --yes
