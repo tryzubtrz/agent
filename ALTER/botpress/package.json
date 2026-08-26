@@ -1,0 +1,19 @@
+{
+  "name": "alter-botpress-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "adk check",
+    "build": "adk build",
+    "deploy": "adk deploy --yes"
+  },
+  "dependencies": {
+    "@botpress/runtime": "2.0.5"
+  },
+  "devDependencies": {
+    "@botpress/adk": "2.0.5",
+    "@botpress/adk-cli": "2.0.5",
+    "typescript": "5.9.2"
+  }
+}

@@ -1,0 +1,5 @@
+node_modules/
+.adk/
+agent.local.json
+.env
+.env.*

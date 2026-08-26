@@ -1,0 +1,5 @@
+# ALTER Botpress deployment trigger
+# Do not place tokens or credentials in this file.
+# After the GitHub Actions secret BOTPRESS_PAT is configured,
+# update this file to trigger a cloud deployment.
+status=waiting-for-botpress-pat
