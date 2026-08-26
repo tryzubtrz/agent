@@ -1,0 +1,61 @@
+name: Migrate ALTER into agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/migrate-alter.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout destination
+        uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+
+      - name: Clone ALTER source branch
+        run: |
+          git clone --depth 1 --branch alter-foundation https://github.com/tryzubtrz/ai.git /tmp/alter-source
+
+      - name: Copy ALTER project and workflows
+        run: |
+          rm -rf ALTER
+          cp -R /tmp/alter-source/ALTER ./ALTER
+          mkdir -p .github/workflows
+          cp /tmp/alter-source/.github/workflows/alter-*.yml .github/workflows/
+
+          # Adapt the migrated project to this repository/default branch.
+          find ALTER .github/workflows -type f -print0 | xargs -0 sed -i 's/tryzubtrz\/ai/tryzubtrz\/agent/g'
+          find ALTER .github/workflows -type f -print0 | xargs -0 sed -i 's/alter-foundation/main/g'
+
+          cat > README.md <<'EOF'
+          # ALTER Agent
+
+          Private home repository for **ALTER — Universal Digital Twin**.
+
+          The product source lives in `ALTER/`:
+          - `ALTER/web` — mobile-first PWA cockpit
+          - `ALTER/core` — policy/orchestration API core
+          - `ALTER/botpress` — Botpress ADK specialist and cloud deployment
+          - `ALTER/ios` — SwiftUI companion foundation
+          - `ALTER/docs` — architecture and threat model
+
+          Botpress deployment is targeted at the configured ALTER workspace/bot and reads `BOTPRESS_PAT` only from GitHub Actions Secrets.
+          EOF
+
+      - name: Commit migration
+        run: |
+          git config user.name "ALTER Cloud Migration"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No migration changes to commit."
+          else
+            git commit -m "migrate: move ALTER foundation into agent repository"
+            git push origin main
+          fi
