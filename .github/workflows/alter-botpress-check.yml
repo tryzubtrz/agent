@@ -39,9 +39,13 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: TypeScript check
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: npx tsc --noEmit
 
       - name: ADK offline structure check
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: npx adk check
 
       # Full adk build resolves live Botpress interfaces and therefore
