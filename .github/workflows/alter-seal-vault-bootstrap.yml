@@ -113,3 +113,5 @@ jobs:
           git add ALTER/core/alter_core/bootstrap_vault.json
           git commit -m "chore: refresh sealed ALTER runtime credential"
           git push
+
+# retrigger: 2026-08-26T11:12Z
