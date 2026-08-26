@@ -71,7 +71,7 @@ jobs:
 
       - name: Deploy ALTER to Botpress Cloud
         working-directory: ALTER/botpress
-        run: npx adk deploy --yes
+        run: npx adk deploy --yes --allow-unconfigured
 
       - name: Report deploy result
         if: always()
@@ -88,7 +88,8 @@ jobs:
               f"Job status: {os.environ.get('JOB_STATUS')}\n"
               f"Secret check step: {os.environ.get('AUTH_OUTCOME')}\n"
               'Target workspace: wkspace_01M0XTFXYMFEDGHEEKT710G22P\n'
-              'Target bot: 64f3490a-183a-47c5-b825-97210771822f'
+              'Target bot: 64f3490a-183a-47c5-b825-97210771822f\n'
+              'Unconfigured optional dependencies are allowed to remain inert.'
           )
           print(json.dumps(body))
           PY
