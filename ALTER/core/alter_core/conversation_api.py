@@ -16,6 +16,7 @@ gateway = BotpressGateway()
 
 _MAX_MESSAGES = 60
 _CONTEXT_MESSAGES = 16
+_REQUIRED_SPECIALIST_BOUNDARY = "core-policy-required"
 
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+\-/=]{8,}"), "Bearer [REDACTED]"),
@@ -195,6 +196,17 @@ def respond_in_conversation(
     except BotpressRuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    if output.get("sideEffectsPerformed") is not False:
+        raise HTTPException(
+            status_code=502,
+            detail="ALTER specialist violated the no-side-effect response contract.",
+        )
+    if output.get("boundary") != _REQUIRED_SPECIALIST_BOUNDARY:
+        raise HTTPException(
+            status_code=502,
+            detail="ALTER specialist returned an invalid execution boundary.",
+        )
+
     response = output.get("response")
     if not isinstance(response, str) or not response.strip():
         raise HTTPException(status_code=502, detail="ALTER specialist returned no usable response.")
@@ -223,6 +235,7 @@ def respond_in_conversation(
             "message_count": len(updated),
             "owner_message_redacted": owner_redacted,
             "agent_message_redacted": response_redacted,
+            "boundary": _REQUIRED_SPECIALIST_BOUNDARY,
         },
     )
 
@@ -232,7 +245,7 @@ def respond_in_conversation(
         "agent": agent_message,
         "persistent": True,
         "side_effects_performed": False,
-        "boundary": "core-policy-required",
+        "boundary": _REQUIRED_SPECIALIST_BOUNDARY,
     }
 
 
