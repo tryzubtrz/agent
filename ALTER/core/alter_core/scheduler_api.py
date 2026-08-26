@@ -13,6 +13,7 @@ from fastapi import APIRouter, Header, HTTPException
 
 from .auth import system_principal
 from .automation_tick_api import tick_automations
+from .botpress_gateway import BotpressGateway
 
 router = APIRouter()
 
@@ -81,7 +82,7 @@ def _verify_oidc(token: str) -> dict[str, Any]:
         and claims.get("repository") == _REPOSITORY
         and claims.get("ref") == _REF
         and claims.get("workflow_ref") == _WORKFLOW_REF
-        and claims.get("event_name") in {"schedule", "workflow_dispatch"}
+        and claims.get("event_name") in {"schedule", "workflow_dispatch", "push"}
         and str(claims.get("sub") or "").startswith(f"repo:{_REPOSITORY}:")
         and now - 60 <= exp
         and now - 900 <= iat <= now + 60
@@ -98,10 +99,14 @@ def github_scheduler_tick(authorization: str | None = Header(default=None, alias
     claims = _verify_oidc(authorization.removeprefix("Bearer ").strip())
     principal = system_principal("github-actions-scheduler")
     result = tick_automations(principal)
+    agent_status = BotpressGateway().status()
     return {
         **result,
         "scheduler": "github-actions-oidc",
         "repository": claims.get("repository"),
         "run_id": claims.get("run_id"),
         "static_scheduler_secret": False,
+        "agent_configured": agent_status.configured,
+        "agent_action": agent_status.action,
+        "secret_exposed": False,
     }
