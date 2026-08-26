@@ -63,6 +63,7 @@ class CreatePolicyBody(BaseModel):
 
 
 @app.get("/health")
+@app.get("/api/health")
 def health() -> dict[str, str]:
     return {
         "service": "alter-core",
@@ -73,6 +74,7 @@ def health() -> dict[str, str]:
 
 
 @app.post("/tasks", response_model=Task)
+@app.post("/api/tasks", response_model=Task)
 def create_task(
     body: CreateTaskBody,
     principal: Principal = Depends(require_owner),
@@ -93,6 +95,7 @@ def create_task(
 
 
 @app.get("/tasks/{task_id}", response_model=Task)
+@app.get("/api/tasks/{task_id}", response_model=Task)
 def get_task(
     task_id: UUID,
     principal: Principal = Depends(require_owner),
@@ -101,6 +104,7 @@ def get_task(
 
 
 @app.get("/policies", response_model=list[PolicyRule])
+@app.get("/api/policies", response_model=list[PolicyRule])
 def list_policies(
     principal: Principal = Depends(require_owner),
 ) -> list[PolicyRule]:
@@ -108,6 +112,7 @@ def list_policies(
 
 
 @app.post("/policies", response_model=PolicyRule)
+@app.post("/api/policies", response_model=PolicyRule)
 def create_policy(
     body: CreatePolicyBody,
     principal: Principal = Depends(require_owner),
@@ -134,6 +139,7 @@ def create_policy(
 
 
 @app.post("/actions/evaluate", response_model=Task)
+@app.post("/api/actions/evaluate", response_model=Task)
 def evaluate_action(
     body: EvaluateActionBody,
     principal: Principal = Depends(require_owner),
@@ -166,6 +172,7 @@ def evaluate_action(
 
 
 @app.post("/tasks/{task_id}/approve", response_model=Task)
+@app.post("/api/tasks/{task_id}/approve", response_model=Task)
 def approve_action(
     task_id: UUID,
     body: ApproveActionBody,
