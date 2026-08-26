@@ -202,6 +202,26 @@ class PostgresAuditStore:
                 ),
             )
 
+    def list_for_workspace(
+        self,
+        workspace_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_id, task_id, actor_type, actor_id,
+                       event_type, payload, created_at
+                FROM audit_events
+                WHERE workspace_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (workspace_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
 
 class PostgresMemoryStore:
     def __init__(self, dsn: str) -> None:
@@ -255,6 +275,63 @@ class PostgresMemoryStore:
         with connect(self.dsn, row_factory=dict_row) as conn:
             rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+
+class PostgresConnectorStore:
+    def __init__(self, dsn: str) -> None:
+        self.dsn = dsn
+
+    def list_for_workspace(self, workspace_id: UUID) -> list[dict[str, Any]]:
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_id, connector_key, status, capabilities,
+                       details, checked_at, updated_at
+                FROM connector_states
+                WHERE workspace_id = %s
+                ORDER BY connector_key ASC
+                """,
+                (workspace_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert(
+        self,
+        *,
+        workspace_id: UUID,
+        connector_key: str,
+        status: str,
+        capabilities: list[str] | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            _ensure_workspace(conn, workspace_id)
+            row = conn.execute(
+                """
+                INSERT INTO connector_states (
+                    workspace_id, connector_key, status, capabilities,
+                    details, checked_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, now(), now())
+                ON CONFLICT (workspace_id, connector_key)
+                DO UPDATE SET
+                    status = EXCLUDED.status,
+                    capabilities = EXCLUDED.capabilities,
+                    details = EXCLUDED.details,
+                    checked_at = now(),
+                    updated_at = now()
+                RETURNING id, workspace_id, connector_key, status, capabilities,
+                          details, checked_at, updated_at
+                """,
+                (
+                    workspace_id,
+                    connector_key,
+                    status,
+                    Jsonb(capabilities or []),
+                    Jsonb(details or {}),
+                ),
+            ).fetchone()
+        assert row is not None
+        return dict(row)
 
 
 def _ensure_workspace(conn: Any, workspace_id: UUID) -> None:
