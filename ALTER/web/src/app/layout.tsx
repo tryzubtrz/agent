@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import OwnerGate from "@/components/OwnerGate";
 import ApprovalCenter from "@/components/ApprovalCenter";
+import ModuleRouteBridge from "@/components/ModuleRouteBridge";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -32,6 +33,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <OwnerGate>
           {children}
           <ApprovalCenter />
+          <ModuleRouteBridge />
         </OwnerGate>
       </body>
     </html>
