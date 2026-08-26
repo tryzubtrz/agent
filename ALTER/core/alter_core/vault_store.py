@@ -18,6 +18,7 @@ from .persistence import PostgresMemoryStore
 _VAULT_NAMESPACE = "_vault.runtime"
 _VERSION = 1
 _BOOTSTRAP_FILE = "bootstrap_vault.json"
+_BOOTSTRAP_SALT = hashlib.sha256(b"ALTER-Bootstrap-v1").digest()
 
 
 class VaultUnavailableError(RuntimeError):
@@ -83,17 +84,21 @@ def bootstrap_public_key() -> str:
     return _encode(public)
 
 
-def _bootstrap_wrap_key(context: VaultContext, alias: str, shared_secret: bytes) -> bytes:
+def _bootstrap_wrap_key(alias: str, shared_secret: bytes) -> bytes:
     return HKDF(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=hashlib.sha256(context.workspace_id.bytes).digest(),
+        salt=_BOOTSTRAP_SALT,
         info=f"ALTER-Bootstrap-v1:{alias}".encode("utf-8"),
     ).derive(shared_secret)
 
 
 def _aad(context: VaultContext, alias: str) -> bytes:
     return f"{_VERSION}:{context.workspace_id}:{alias}".encode("utf-8")
+
+
+def _bootstrap_aad(alias: str) -> bytes:
+    return f"{_VERSION}:{alias}".encode("utf-8")
 
 
 def _encode(data: bytes) -> str:
@@ -168,10 +173,10 @@ def _load_bootstrap_secret(context: VaultContext, alias: str) -> str | None:
     try:
         ephemeral = X25519PublicKey.from_public_bytes(_decode(str(envelope["ephemeral_public_key"])))
         shared = _bootstrap_private_key(context).exchange(ephemeral)
-        wrap_key = _bootstrap_wrap_key(context, alias, shared)
+        wrap_key = _bootstrap_wrap_key(alias, shared)
         nonce = _decode(str(envelope["nonce"]))
         ciphertext = _decode(str(envelope["ciphertext"]))
-        plaintext = AESGCM(wrap_key).decrypt(nonce, ciphertext, _aad(context, alias))
+        plaintext = AESGCM(wrap_key).decrypt(nonce, ciphertext, _bootstrap_aad(alias))
         return plaintext.decode("utf-8")
     except Exception as exc:
         raise VaultIntegrityError("Bootstrap vault envelope could not be decrypted.") from exc
@@ -187,8 +192,6 @@ def load_secret(alias: str) -> str | None:
     if not bootstrapped:
         return None
 
-    # Best-effort migration from the sealed deployment envelope into Neon.
-    # Failure to persist must not reveal or log the secret value.
     try:
         store_secret(alias, bootstrapped)
     except Exception:
