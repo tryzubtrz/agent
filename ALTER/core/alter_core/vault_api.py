@@ -7,7 +7,12 @@ from pydantic import BaseModel, Field, SecretStr
 
 from .auth import Principal, require_owner
 from .github_oidc import GitHubOIDCError, validate_github_actions_oidc
-from .vault_store import VaultUnavailableError, secret_configured, store_secret
+from .vault_store import (
+    VaultUnavailableError,
+    bootstrap_public_key,
+    secret_configured,
+    store_secret,
+)
 
 router = APIRouter()
 
@@ -32,6 +37,21 @@ def _is_configured(alias: str, env_name: str, allow_runtime_vault: bool) -> tupl
     if allow_runtime_vault and secret_configured(alias):
         return True, "encrypted-runtime-vault"
     return False, "not-configured"
+
+
+@router.get("/api/vault/bootstrap/public-key")
+def vault_bootstrap_public_key() -> dict[str, object]:
+    """Expose only the public sealing key used for one-way secret transfer into ALTER."""
+    try:
+        public_key = bootstrap_public_key()
+    except VaultUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="Runtime vault bootstrap key is unavailable.") from exc
+    return {
+        "version": 1,
+        "algorithm": "X25519-HKDF-SHA256+A256GCM",
+        "public_key": public_key,
+        "value_exposed": False,
+    }
 
 
 @router.get("/vault/aliases")
@@ -72,7 +92,8 @@ def bootstrap_vault_from_github(
 ) -> dict[str, object]:
     """Accept one tightly-scoped secret from the repository's main-branch Actions OIDC identity.
 
-    The route never returns the submitted value and only allows pre-approved aliases.
+    This direct path is retained for environments where Vercel project protection permits
+    machine-to-machine access. The sealed bootstrap envelope is used when protection blocks it.
     """
     if body.alias not in _BOOTSTRAP_ALLOWED_ALIASES:
         raise HTTPException(status_code=403, detail="Vault alias is not allowed for GitHub bootstrap.")
