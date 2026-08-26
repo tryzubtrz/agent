@@ -4,7 +4,7 @@ import os
 from typing import Any
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import Principal, require_owner
@@ -18,12 +18,13 @@ from .orchestrator import (
 from .persistence import (
     PostgresApprovalStore,
     PostgresAuditStore,
+    PostgresMemoryStore,
     PostgresPolicyStore,
     PostgresTaskStore,
 )
 from .policy_store import InMemoryPolicyStore
 
-app = FastAPI(title="ALTER Core", version="0.2.0")
+app = FastAPI(title="ALTER Core", version="0.3.0")
 
 _database_url = os.getenv("DATABASE_URL")
 if _database_url:
@@ -31,15 +32,18 @@ if _database_url:
     policy_store = PostgresPolicyStore(_database_url)
     approval_store: PostgresApprovalStore | None = PostgresApprovalStore(_database_url)
     audit_store: PostgresAuditStore | None = PostgresAuditStore(_database_url)
+    memory_store: PostgresMemoryStore | None = PostgresMemoryStore(_database_url)
     STORAGE_MODE = "postgres"
 else:
     task_store = InMemoryTaskStore()
     policy_store = InMemoryPolicyStore()
     approval_store = None
     audit_store = None
+    memory_store = None
     STORAGE_MODE = "memory"
 
 orchestrator = TaskOrchestrator(store=task_store)
+_memory_fallback: dict[tuple[UUID, UUID, str, str], Any] = {}
 
 
 class CreateTaskBody(BaseModel):
@@ -62,15 +66,34 @@ class CreatePolicyBody(BaseModel):
     priority: int = Field(default=100, ge=0, le=10_000)
 
 
+class MemoryUpsertBody(BaseModel):
+    namespace: str = Field(min_length=1, max_length=120)
+    key: str = Field(min_length=1, max_length=240)
+    value: Any
+
+
 @app.get("/health")
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {
         "service": "alter-core",
         "status": "ok",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "storage": STORAGE_MODE,
     }
+
+
+@app.get("/tasks", response_model=list[Task])
+@app.get("/api/tasks", response_model=list[Task])
+def list_tasks(
+    limit: int = Query(default=100, ge=1, le=250),
+    principal: Principal = Depends(require_owner),
+) -> list[Task]:
+    return task_store.list_for_owner(
+        principal.workspace_id,
+        principal.user_id,
+        limit=limit,
+    )
 
 
 @app.post("/tasks", response_model=Task)
@@ -101,6 +124,33 @@ def get_task(
     principal: Principal = Depends(require_owner),
 ) -> Task:
     return _get_owned_task(task_id, principal)
+
+
+@app.post("/tasks/{task_id}/ready", response_model=Task)
+@app.post("/api/tasks/{task_id}/ready", response_model=Task)
+def mark_task_ready(
+    task_id: UUID,
+    principal: Principal = Depends(require_owner),
+) -> Task:
+    _get_owned_task(task_id, principal)
+    task = orchestrator.mark_ready(task_id)
+    _audit(principal, event_type="task.ready", task_id=task.id)
+    return task
+
+
+@app.post("/tasks/{task_id}/complete", response_model=Task)
+@app.post("/api/tasks/{task_id}/complete", response_model=Task)
+def complete_task(
+    task_id: UUID,
+    principal: Principal = Depends(require_owner),
+) -> Task:
+    _get_owned_task(task_id, principal)
+    task = orchestrator.complete_task(
+        task_id=task_id,
+        workspace_id=principal.workspace_id,
+    )
+    _audit(principal, event_type="task.completed", task_id=task.id)
+    return task
 
 
 @app.get("/policies", response_model=list[PolicyRule])
@@ -134,6 +184,62 @@ def create_policy(
             "effect": saved.effect.value,
             "priority": saved.priority,
         },
+    )
+    return saved
+
+
+@app.get("/memory")
+@app.get("/api/memory")
+def list_memory(
+    namespace: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=100, ge=1, le=250),
+    principal: Principal = Depends(require_owner),
+) -> list[dict[str, Any]]:
+    if memory_store is not None:
+        return memory_store.list_for_user(
+            workspace_id=principal.workspace_id,
+            user_id=principal.user_id,
+            namespace=namespace,
+            limit=limit,
+        )
+
+    items: list[dict[str, Any]] = []
+    for (workspace_id, user_id, item_namespace, key), value in _memory_fallback.items():
+        if workspace_id != principal.workspace_id or user_id != principal.user_id:
+            continue
+        if namespace is not None and item_namespace != namespace:
+            continue
+        items.append({"namespace": item_namespace, "key": key, "value": value})
+    return items[:limit]
+
+
+@app.put("/memory")
+@app.put("/api/memory")
+def upsert_memory(
+    body: MemoryUpsertBody,
+    principal: Principal = Depends(require_owner),
+) -> dict[str, Any]:
+    if memory_store is not None:
+        saved = memory_store.upsert(
+            workspace_id=principal.workspace_id,
+            user_id=principal.user_id,
+            namespace=body.namespace,
+            key=body.key,
+            value=body.value,
+        )
+    else:
+        _memory_fallback[
+            (principal.workspace_id, principal.user_id, body.namespace, body.key)
+        ] = body.value
+        saved = {
+            "namespace": body.namespace,
+            "key": body.key,
+            "value": body.value,
+        }
+    _audit(
+        principal,
+        event_type="memory.upserted",
+        payload={"namespace": body.namespace, "key": body.key},
     )
     return saved
 
