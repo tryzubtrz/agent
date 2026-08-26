@@ -1,4 +1,6 @@
+import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
+import { OWNER_SESSION_COOKIE, verifyOwnerSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +17,14 @@ function coreToken(): string {
 }
 
 async function proxy(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
+  const cookieStore = await cookies();
+  if (!verifyOwnerSession(cookieStore.get(OWNER_SESSION_COOKIE)?.value)) {
+    return NextResponse.json(
+      { error: "Owner authentication required" },
+      { status: 401, headers: { "cache-control": "no-store" } },
+    );
+  }
+
   try {
     const { path } = await context.params;
     const suffix = path.map(encodeURIComponent).join("/");
