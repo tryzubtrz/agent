@@ -2,14 +2,23 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "ALTER",
+    name: "ALTER — Universal Digital Twin",
     short_name: "ALTER",
-    description: "Personal AI control plane",
+    description: "Owner-controlled AI control plane for tasks, browser sessions, memory, rules, models and connectors.",
     start_url: "/",
+    scope: "/",
     display: "standalone",
-    background_color: "#08090c",
-    theme_color: "#08090c",
+    background_color: "#050608",
+    theme_color: "#050608",
     orientation: "portrait-primary",
-    categories: ["productivity", "utilities"]
+    categories: ["productivity", "utilities"],
+    icons: [
+      {
+        src: "/icon.svg",
+        sizes: "any",
+        type: "image/svg+xml",
+        purpose: "any maskable"
+      }
+    ]
   };
 }
