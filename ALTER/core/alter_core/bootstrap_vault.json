@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "algorithm": "X25519-HKDF-SHA256+A256GCM",
+  "alias": "vault:botpress_runtime",
+  "ephemeral_public_key": "U-eHuBGraW-5xMk0cYpv8EUr1p3CQSEIv_QLmR_Swyc=",
+  "nonce": "kNeUf0v5nywIvfbl",
+  "ciphertext": "vPxe4gKVgdYLl8aYjaBWbARf8-JC71549fQdCUWYBeReeADb76-ebNgknJoppVCJHBjRjXjnCd72v4o="
+}
