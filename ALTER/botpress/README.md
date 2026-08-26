@@ -25,6 +25,8 @@ GitHub Actions acts as the temporary cloud computer. The workflow installs the B
 
 A Botpress PAT has account-level access. It lives only in GitHub Actions Secrets and is provided to the runner at deployment time. The repository contains only the non-secret workspace and bot identifiers.
 
+The current external Runtime API call also uses this vaulted PAT. Botpress documents PATs as carrying the same access as their owner; therefore the production token should belong to a dedicated Botpress account restricted to the ALTER workspace. A Bot Access Key is narrower, but Botpress provides it to the deployed bot runtime rather than as the normal external ADK deployment credential.
+
 ## Current scope
 
 This first ADK deployment establishes ALTER identity, priority rules, prompt-injection resistance, policy/approval boundaries, secret handling rules, workspace isolation, recovery behavior and a verified-done criterion. Browser live-view, Android execution, production Vault injection and external side-effect tools remain separate executors and must not be simulated by the Botpress agent.

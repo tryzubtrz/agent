@@ -27,10 +27,12 @@ class BotpressGatewayStatus:
 
 
 class BotpressGateway:
-    """Least-privilege runtime gateway for the ALTER reasoning specialist.
+    """Narrow-surface runtime gateway for the ALTER reasoning specialist.
 
     The gateway intentionally targets one Botpress Runtime action only. It does
-    not expose the Admin API and never includes secrets in raised errors.
+    not expose the Admin API and never includes secrets in raised errors. The
+    external credential may still be a broad Botpress PAT, so it must remain in
+    ALTER Vault and should belong to a dedicated restricted Botpress account.
     """
 
     DEFAULT_BOT_ID = "64f3490a-183a-47c5-b825-97210771822f"

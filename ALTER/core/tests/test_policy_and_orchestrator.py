@@ -128,6 +128,7 @@ def test_approval_is_bound_to_exact_pending_action_digest():
         owner_user_id=uuid4(),
         objective="Publish a post",
     )
+    orchestrator.mark_ready(task.id)
     action = make_action(
         workspace_id=workspace_id,
         task_id=task.id,
@@ -155,6 +156,7 @@ def test_approval_is_bound_to_exact_pending_action_digest():
     )
     assert approved.status == TaskStatus.EXECUTING
     assert approval.approved is True
+    assert approved.pending_action == action
 
 
 def test_human_authentication_pauses_instead_of_bypassing():
@@ -165,6 +167,7 @@ def test_human_authentication_pauses_instead_of_bypassing():
         owner_user_id=uuid4(),
         objective="Open authenticated service",
     )
+    orchestrator.mark_ready(task.id)
     action = make_action(
         workspace_id=workspace_id,
         task_id=task.id,
@@ -178,3 +181,41 @@ def test_human_authentication_pauses_instead_of_bypassing():
 
     assert waiting.status == TaskStatus.AWAITING_LOGIN
     assert waiting.pending_action is not None
+
+
+def test_approval_rechecks_current_policy_and_rejects_stale_authority():
+    orchestrator = TaskOrchestrator()
+    workspace_id = uuid4()
+    task = orchestrator.create_task(
+        workspace_id=workspace_id,
+        owner_user_id=uuid4(),
+        objective="Publish a post",
+    )
+    orchestrator.mark_ready(task.id)
+    action = make_action(
+        workspace_id=workspace_id,
+        task_id=task.id,
+        category="social_publish",
+        risk=ActionRisk.PUBLIC,
+        operation="publish_post",
+    )
+    orchestrator.request_action(action)
+    new_deny_rule = PolicyRule(
+        workspace_id=workspace_id,
+        original_text="Do not publish anything",
+        category="social_publish",
+        effect=PolicyEffect.DENY,
+        priority=1,
+    )
+
+    with pytest.raises(ApprovalMismatchError, match="Current policy denies"):
+        orchestrator.approve_pending_action(
+            task_id=task.id,
+            workspace_id=workspace_id,
+            action_digest=action.digest(),
+            owner_rules=[new_deny_rule],
+        )
+
+    blocked = orchestrator.store.get(task.id)
+    assert blocked.status == TaskStatus.BLOCKED_BY_RULE
+    assert blocked.pending_action is None

@@ -1,9 +1,11 @@
+import os
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
 from api.index import app
+from app.main import app as vercel_app
 from alter_core import conversation_api
 
 
@@ -32,6 +34,20 @@ def test_canonical_app_mounts_completion_routes(monkeypatch):
     assert client.get("/api/media/status", headers=auth(token)).status_code == 200
     assert client.get("/api/documents", headers=auth(token)).status_code == 200
     assert client.get("/api/notifications", headers=auth(token)).status_code == 200
+
+
+def test_vercel_entrypoint_mounts_the_same_completion_routes(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(vercel_app)
+    assert client.get("/api/system/status", headers=auth(token)).status_code == 200
+    assert client.get("/api/agent/status", headers=auth(token)).status_code == 200
+    assert client.get("/api/vault/aliases", headers=auth(token)).status_code == 200
+    assert client.get("/api/memory/items", headers=auth(token)).status_code == 200
+    assert client.post(
+        "/api/rag/search",
+        headers=auth(token),
+        json={"query": "ALTER verification"},
+    ).status_code == 200
 
 
 def test_public_vault_sealing_key_contains_no_private_material(monkeypatch):
@@ -85,11 +101,20 @@ def test_media_generation_requires_explicit_cost_confirmation(monkeypatch):
 def test_rag_excludes_vault_and_includes_document_knowledge(monkeypatch):
     token = configure_owner(monkeypatch)
     client = TestClient(app)
-    client.put(
+    blocked = client.put(
         "/api/memory",
         headers=auth(token),
         json={"namespace": "_vault.runtime", "key": "vault:test", "value": {"note": "purple-elephant-secret-context"}},
     )
+    assert blocked.status_code == 403
+    conversation_api._memory_fallback[
+        (
+            UUID(os.environ["ALTER_OWNER_WORKSPACE_ID"]),
+            UUID(os.environ["ALTER_OWNER_USER_ID"]),
+            "_vault.runtime",
+            "vault:test",
+        )
+    ] = {"note": "purple-elephant-secret-context"}
     client.put(
         "/api/memory",
         headers=auth(token),

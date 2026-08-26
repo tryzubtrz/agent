@@ -2,8 +2,9 @@
 # Do not place tokens or credentials in this file.
 # BOTPRESS_PAT is stored only in GitHub Actions Secrets.
 status=requested
-requested_at=2026-08-26T06:24Z
-purpose=deploy-friendly-alter-specialist
+requested_at=2026-08-26T09:23Z
+purpose=verify-alter-think-runtime-contract
 workspace=wkspace_01M0XTFXYMFEDGHEEKT710G22P
 bot=64f3490a-183a-47c5-b825-97210771822f
 notion_kb=disabled-inert
+

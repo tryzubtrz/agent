@@ -65,7 +65,13 @@ jobs:
         working-directory: ALTER/botpress
         run: npx adk link --workspace "$BOTPRESS_WORKSPACE_ID" --bot "$BOTPRESS_BOT_ID" --force
 
-      - name: Validate before deploy
+      - name: Type-check before deploy
+        working-directory: ALTER/botpress
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: npx tsc --noEmit
+
+      - name: Validate ADK structure before deploy
         working-directory: ALTER/botpress
         run: npx adk check
 
@@ -73,18 +79,31 @@ jobs:
         working-directory: ALTER/botpress
         run: npx adk deploy --yes --allow-unconfigured
 
-      - name: Smoke test Botpress Runtime API
+      - name: Verify deployed alterThink contract
         env:
           BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
         run: |
           set -euo pipefail
+          cat >/tmp/alter-think-request.json <<'JSON'
+          {
+            "type": "alterThink",
+            "input": {
+              "objective": "Return a brief confirmation that ALTER specialist reasoning is online. Do not claim any side effect.",
+              "context": "Post-deployment contract verification from GitHub Actions.",
+              "mode": "quick"
+            }
+          }
+          JSON
           HTTP_STATUS=$(curl -sS -o /tmp/botpress-runtime.json -w '%{http_code}' \
+            --request POST \
             -H "Authorization: Bearer $BOTPRESS_PAT" \
             -H "x-bot-id: $BOTPRESS_BOT_ID" \
             -H "Accept: application/json" \
-            "https://api.botpress.cloud/v1/chat/conversations?sortField=updatedAt&sortDirection=desc")
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/alter-think-request.json \
+            "https://api.botpress.cloud/v1/chat/actions")
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "Botpress Runtime API smoke test failed with HTTP $HTTP_STATUS"
+            echo "Botpress alterThink contract verification failed with HTTP $HTTP_STATUS"
             python - <<'PY'
           from pathlib import Path
           text = Path('/tmp/botpress-runtime.json').read_text(errors='replace')
@@ -96,8 +115,17 @@ jobs:
           import json
           from pathlib import Path
           payload = json.loads(Path('/tmp/botpress-runtime.json').read_text())
-          conversations = payload.get('conversations', [])
-          print(f"Botpress Runtime API reachable; conversations returned: {len(conversations)}")
+          output = payload.get('output')
+          if not isinstance(output, dict):
+              raise SystemExit('Botpress response did not contain an output object.')
+          response = output.get('response')
+          if not isinstance(response, str) or not response.strip():
+              raise SystemExit('Botpress alterThink returned no usable response.')
+          if output.get('sideEffectsPerformed') is not False:
+              raise SystemExit('Botpress alterThink violated the no-side-effect contract.')
+          if output.get('boundary') != 'core-policy-required':
+              raise SystemExit('Botpress alterThink returned an invalid Core policy boundary.')
+          print('Botpress alterThink contract verified: usable response, no side effects, Core policy boundary intact.')
           PY
 
       - name: Report deploy result
@@ -116,7 +144,7 @@ jobs:
               f"Secret check step: {os.environ.get('AUTH_OUTCOME')}\n"
               'Target workspace: wkspace_01M0XTFXYMFEDGHEEKT710G22P\n'
               'Target bot: 64f3490a-183a-47c5-b825-97210771822f\n'
-              'Runtime API smoke test is part of this deploy job.\n'
+              'The deployed alterThink action contract is verified after deployment.\n'
               'Unconfigured optional dependencies are allowed to remain inert.'
           )
           print(json.dumps(body))
@@ -128,3 +156,4 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$REPO/issues" \
             -d "{\"title\":\"ALTER Botpress deploy: $JOB_STATUS\",\"body\":$BODY}"
+

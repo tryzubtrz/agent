@@ -8,7 +8,7 @@ from typing import Any, Iterable
 
 from .secret_safety import redact_secrets
 
-EXCLUDED_NAMESPACE_PREFIXES = ("_vault", "access.", "conversation")
+EXCLUDED_NAMESPACE_PREFIXES = ("_vault", "vault_secure", "access.", "conversation")
 DEFAULT_CHUNK_SIZE = 1200
 DEFAULT_CHUNK_OVERLAP = 180
 

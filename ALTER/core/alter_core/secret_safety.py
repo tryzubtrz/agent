@@ -29,6 +29,14 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
+_SECRET_FIELD_NAME = re.compile(
+    r"(?i)^(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|auth(?:orization)?|password|passwd|secret|cookie|session[_ -]?token|pat)$"
+)
+
+
+def _is_vault_alias(value: str) -> bool:
+    return value.strip().lower().startswith("vault:")
+
 
 def redact_secrets(text: str) -> tuple[str, bool]:
     safe = text
@@ -51,7 +59,18 @@ def contains_high_confidence_secret(value: Any) -> bool:
         _safe, changed = redact_secrets(value)
         return changed
     if isinstance(value, dict):
-        return any(contains_high_confidence_secret(item) for item in value.values())
+        for key, item in value.items():
+            if (
+                isinstance(key, str)
+                and _SECRET_FIELD_NAME.fullmatch(key.strip())
+                and isinstance(item, str)
+                and len(item.strip()) >= 6
+                and not _is_vault_alias(item)
+            ):
+                return True
+            if contains_high_confidence_secret(item):
+                return True
+        return False
     if isinstance(value, (list, tuple)):
         return any(contains_high_confidence_secret(item) for item in value)
     return False

@@ -115,7 +115,7 @@ def _memory_list(principal: Principal, namespace: str | None = None, limit: int 
 
 
 def _memory_put(principal: Principal, namespace: str, key: str, value: Any) -> dict[str, Any]:
-    if contains_high_confidence_secret(value) and namespace not in {"_vault.runtime"}:
+    if contains_high_confidence_secret(value):
         raise HTTPException(status_code=422, detail="Secret-like content must be stored through ALTER Vault, not ordinary memory.")
     if memory_store is not None:
         return memory_store.upsert(
@@ -190,9 +190,22 @@ def task_inspector(task_id: UUID, principal: Principal = Depends(require_owner))
         ]
     meta_rows = _memory_list(principal, "task.meta", 250)
     meta = next((row.get("value") for row in meta_rows if row.get("key") == str(task_id)), {})
+    plan_rows = _memory_list(principal, "task.plan", 250)
+    plan = next((row.get("value") for row in plan_rows if row.get("key") == str(task_id)), None)
+    result_rows = _memory_list(principal, "task.result", 250)
+    result = next((row.get("value") for row in result_rows if row.get("key") == str(task_id)), None)
+    action_result_rows = _memory_list(principal, "task.action_result", 250)
+    action_results = [
+        row.get("value")
+        for row in action_result_rows
+        if str(row.get("key", "")).startswith(f"{task_id}:") and isinstance(row.get("value"), dict)
+    ]
     return {
         "task": task.model_dump(mode="json"),
         "meta": meta if isinstance(meta, dict) else {},
+        "plan": plan if isinstance(plan, dict) else None,
+        "result": result if isinstance(result, dict) else None,
+        "action_results": action_results,
         "events": events,
         "pending_action_digest": task.pending_action.digest() if task.pending_action else None,
     }

@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import Principal, require_owner
-from .models import Task, TaskStatus
+from .models import Approval, Task, TaskStatus
 from .orchestrator import ApprovalMismatchError
-from .api import _audit, orchestrator, task_store
+from .api import _audit, approval_store, orchestrator, policy_store, task_store
 
 router = APIRouter()
 
@@ -71,10 +71,13 @@ def approve_pending(
             task_id=task_id,
             workspace_id=principal.workspace_id,
             action_digest=body.action_digest,
+            owner_rules=policy_store.list_for_workspace(principal.workspace_id),
         )
     except ApprovalMismatchError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    if approval_store is not None:
+        approval_store.save(approval, approved_by=principal.user_id)
     _audit(
         principal,
         event_type="action.approved",
@@ -103,11 +106,19 @@ def reject_pending(
     if task.pending_action.digest() != body.action_digest:
         raise HTTPException(status_code=409, detail="Rejection does not match the pending action")
 
+    rejection = Approval(
+        workspace_id=principal.workspace_id,
+        task_id=task.id,
+        action_digest=body.action_digest,
+        approved=False,
+    )
     task.status = TaskStatus.PAUSED
     task.current_step = "owner_rejected_action"
     task.blocker = "Owner rejected the pending action."
     task.pending_action = None
     updated = task_store.save(task)
+    if approval_store is not None:
+        approval_store.save(rejection, approved_by=principal.user_id)
     _audit(
         principal,
         event_type="action.rejected",

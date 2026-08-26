@@ -19,7 +19,7 @@ gateway = BotpressGateway()
 _MAX_MESSAGES = 60
 _CONTEXT_MESSAGES = 16
 _REQUIRED_SPECIALIST_BOUNDARY = "core-policy-required"
-_RAG_EXCLUDED_PREFIXES = ("_vault", "access.")
+_RAG_EXCLUDED_PREFIXES = ("_vault", "vault_secure", "access.")
 
 
 class AppendMessageBody(BaseModel):
@@ -185,3 +185,4 @@ def clear_conversation(principal: Principal = Depends(require_owner)) -> dict[st
     _save_messages(principal, [])
     _audit(principal, event_type="conversation.cleared", payload={"message_count": 0})
     return {"cleared": True, "message_count": 0}
+
