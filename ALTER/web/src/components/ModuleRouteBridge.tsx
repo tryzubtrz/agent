@@ -5,6 +5,7 @@ import { useEffect } from "react";
 
 const routes: Record<string, string> = {
   "ALTER": "/chat",
+  "Конектори": "/gateway",
   "Файли": "/files",
   "Сховище": "/vault",
   "Моделі": "/models",
