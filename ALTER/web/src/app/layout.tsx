@@ -3,6 +3,7 @@ import OwnerGate from "@/components/OwnerGate";
 import ApprovalCenter from "@/components/ApprovalCenter";
 import ModuleRouteBridge from "@/components/ModuleRouteBridge";
 import Telemetry from "@/components/Telemetry";
+import ToolLauncher from "@/components/ToolLauncher";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -36,6 +37,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           <ApprovalCenter />
           <ModuleRouteBridge />
           <Telemetry />
+          <ToolLauncher />
         </OwnerGate>
       </body>
     </html>
