@@ -27,6 +27,7 @@ class TaskStatus(StrEnum):
     PAUSED = "paused"
     DONE = "done"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ActionRisk(StrEnum):
