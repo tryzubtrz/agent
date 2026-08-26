@@ -76,6 +76,7 @@ def _verify_oidc(token: str) -> dict[str, Any]:
     iat = int(claims.get("iat") or 0)
     audience = claims.get("aud")
     audiences = {audience} if isinstance(audience, str) else set(audience or []) if isinstance(audience, list) else set()
+    subject = str(claims.get("sub") or "")
     valid = (
         claims.get("iss") == _ISSUER
         and _AUDIENCE in audiences
@@ -83,7 +84,8 @@ def _verify_oidc(token: str) -> dict[str, Any]:
         and claims.get("ref") == _REF
         and claims.get("workflow_ref") == _WORKFLOW_REF
         and claims.get("event_name") in {"schedule", "workflow_dispatch", "push"}
-        and str(claims.get("sub") or "").startswith(f"repo:{_REPOSITORY}:")
+        and subject.startswith("repo:")
+        and subject.endswith(f":ref:{_REF}")
         and now - 60 <= exp
         and now - 900 <= iat <= now + 60
     )
