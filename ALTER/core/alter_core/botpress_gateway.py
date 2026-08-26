@@ -7,6 +7,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .vault_store import VaultIntegrityError, VaultUnavailableError, load_secret
+
 
 class BotpressUnavailableError(RuntimeError):
     pass
@@ -32,6 +34,7 @@ class BotpressGateway:
     """
 
     DEFAULT_BOT_ID = "64f3490a-183a-47c5-b825-97210771822f"
+    VAULT_ALIAS = "vault:botpress_runtime"
 
     def __init__(
         self,
@@ -41,21 +44,39 @@ class BotpressGateway:
         base_url: str = "https://api.botpress.cloud/v1/chat",
         timeout_seconds: float = 30.0,
     ) -> None:
-        self.token = (token if token is not None else os.getenv("BOTPRESS_RUNTIME_TOKEN", "")).strip()
+        self._explicit_token = token
         configured_bot_id = bot_id if bot_id is not None else os.getenv("BOTPRESS_BOT_ID", self.DEFAULT_BOT_ID)
         self.bot_id = configured_bot_id.strip()
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
 
+    def _resolve_token(self) -> str:
+        if self._explicit_token is not None:
+            return self._explicit_token.strip()
+        env_token = os.getenv("BOTPRESS_RUNTIME_TOKEN", "").strip()
+        if env_token:
+            return env_token
+        try:
+            return (load_secret(self.VAULT_ALIAS) or "").strip()
+        except (VaultUnavailableError, VaultIntegrityError):
+            return ""
+
+    @property
+    def token(self) -> str:
+        """Compatibility accessor that resolves the current credential without exposing its source."""
+        return self._resolve_token()
+
     def status(self) -> BotpressGatewayStatus:
+        token = self._resolve_token()
         return BotpressGatewayStatus(
-            configured=bool(self.token and self.bot_id),
+            configured=bool(token and self.bot_id),
             bot_id_configured=bool(self.bot_id),
-            credential_configured=bool(self.token),
+            credential_configured=bool(token),
         )
 
     def think(self, *, objective: str, context: str = "", mode: str = "normal") -> dict[str, Any]:
-        if not self.token or not self.bot_id:
+        token = self._resolve_token()
+        if not token or not self.bot_id:
             raise BotpressUnavailableError("Botpress specialist credential is not configured in ALTER Core.")
 
         payload = {
@@ -70,7 +91,7 @@ class BotpressGateway:
             f"{self.base_url}/actions",
             data=json.dumps(payload).encode("utf-8"),
             headers={
-                "Authorization": f"Bearer {self.token}",
+                "Authorization": f"Bearer {token}",
                 "x-bot-id": self.bot_id,
                 "Accept": "application/json",
                 "Content-Type": "application/json",
@@ -82,8 +103,6 @@ class BotpressGateway:
             with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310 - fixed HTTPS host by default
                 body = response.read().decode("utf-8")
         except HTTPError as exc:
-            # Never surface the response body because providers may include
-            # sensitive operational details. The status code is sufficient.
             raise BotpressRuntimeError(f"Botpress Runtime API returned HTTP {exc.code}.") from exc
         except (URLError, TimeoutError) as exc:
             raise BotpressRuntimeError("Botpress Runtime API is unreachable.") from exc
