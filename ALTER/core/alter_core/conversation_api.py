@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -10,6 +9,7 @@ from pydantic import BaseModel, Field
 from .api import _audit, _memory_fallback, memory_store
 from .auth import Principal, require_owner
 from .botpress_gateway import BotpressGateway, BotpressRuntimeError, BotpressUnavailableError
+from .secret_safety import redact_secrets
 
 router = APIRouter()
 gateway = BotpressGateway()
@@ -17,32 +17,6 @@ gateway = BotpressGateway()
 _MAX_MESSAGES = 60
 _CONTEXT_MESSAGES = 16
 _REQUIRED_SPECIALIST_BOUNDARY = "core-policy-required"
-
-_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (
-        re.compile(r"(?s)-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----.*?-----END \1-----"),
-        "[REDACTED_PRIVATE_KEY]",
-    ),
-    (
-        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^:\s/@]+:)([^@\s/]+)(@)"),
-        r"\1[REDACTED]\3",
-    ),
-    (
-        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
-        "[REDACTED_JWT]",
-    ),
-    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+\-/=]{8,}"), "Bearer [REDACTED]"),
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"), "[REDACTED_API_KEY]"),
-    (re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"\b(?:bp|bpt|botpress)_[A-Za-z0-9_-]{16,}\b", re.IGNORECASE), "[REDACTED_BOTPRESS_TOKEN]"),
-    (
-        re.compile(
-            r"(?i)\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|auth(?:orization)?|password|passwd|secret|cookie|session[_ -]?token|pat)\s*[:=]\s*([^\s,;]{6,})"
-        ),
-        r"\1=[REDACTED]",
-    ),
-)
 
 
 class AppendMessageBody(BaseModel):
@@ -56,14 +30,8 @@ class ChatBody(BaseModel):
 
 
 def _redact(text: str) -> tuple[str, bool]:
-    safe = text
-    changed = False
-    for pattern, replacement in _SECRET_PATTERNS:
-        updated = pattern.sub(replacement, safe)
-        if updated != safe:
-            changed = True
-            safe = updated
-    return safe, changed
+    """Compatibility wrapper around the shared Core secret sanitizer."""
+    return redact_secrets(text)
 
 
 def _load_messages(principal: Principal) -> list[dict[str, Any]]:
