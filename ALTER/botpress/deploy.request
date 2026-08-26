@@ -1,6 +1,9 @@
-# ALTER Botpress deployment trigger
+# ALTER Botpress deployment status
 # Do not place tokens or credentials in this file.
 # BOTPRESS_PAT is stored only in GitHub Actions Secrets.
-status=deploy-requested
-request=2026-08-26T02:06Z
-mode=allow-unconfigured
+status=deployed
+run_id=32921491552
+deployed_at=2026-08-26T02:09Z
+workspace=wkspace_01M0XTFXYMFEDGHEEKT710G22P
+bot=64f3490a-183a-47c5-b825-97210771822f
+notion_kb=disabled-inert
