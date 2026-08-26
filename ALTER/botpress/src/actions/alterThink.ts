@@ -19,32 +19,51 @@ If an executor is unavailable, say so instead of pretending work was performed.
 Return a concise, concrete specialist response useful to the Core orchestrator.
 `
 
+// Keep the runtime schemas intentionally simple. Botpress' generated ADK types are
+// very deep, and heavily chained Zui schemas can exceed TypeScript's recursion
+// limit even when the runtime schema itself is valid.
+const inputSchema = z.object({
+  objective: z.string(),
+  context: z.string(),
+  mode: z.string(),
+})
+
+const outputSchema = z.object({
+  response: z.string(),
+  sideEffectsPerformed: z.boolean(),
+  boundary: z.string(),
+})
+
 export const alterThink = new Action({
   name: 'alterThink',
   title: 'ALTER Specialist Reasoning',
   description: 'Reason about an ALTER task without performing external side effects. Callable by ALTER Core through the Botpress Runtime API.',
-  input: z.object({
-    objective: z.string().min(1).max(10000).describe('The owner-approved task objective from ALTER Core.'),
-    context: z.string().max(20000).default('').describe('Redacted task context. Never include raw credentials or secrets.'),
-    mode: z.enum(['quick', 'normal', 'deep', 'plan']).default('normal').describe('Requested reasoning depth.'),
-  }),
-  output: z.object({
-    response: z.string().describe('Specialist analysis or proposed next steps.'),
-    sideEffectsPerformed: z.literal(false),
-    boundary: z.literal('core-policy-required'),
-  }),
+  input: inputSchema as any,
+  output: outputSchema as any,
 
   async handler({ input }) {
-    const length = input.mode === 'quick' ? 300 : input.mode === 'deep' ? 1200 : 700
+    const objective = typeof input.objective === 'string' ? input.objective.trim() : ''
+    const context = typeof input.context === 'string' ? input.context : ''
+    const mode = ['quick', 'normal', 'deep', 'plan'].includes(input.mode) ? input.mode : 'normal'
+
+    if (!objective) {
+      return {
+        response: 'Objective is required.',
+        sideEffectsPerformed: false,
+        boundary: 'core-policy-required',
+      }
+    }
+
+    const length = mode === 'quick' ? 300 : mode === 'deep' ? 1200 : 700
     const response = await adk.zai.text(
-      `${SPECIALIST_BOUNDARY}\n\nMODE: ${input.mode}\nOBJECTIVE:\n${input.objective}\n\nREDACTED CONTEXT:\n${input.context || '(none provided)'}`,
+      `${SPECIALIST_BOUNDARY}\n\nMODE: ${mode}\nOBJECTIVE:\n${objective}\n\nREDACTED CONTEXT:\n${context || '(none provided)'}`,
       { length },
     )
 
     return {
       response,
-      sideEffectsPerformed: false as const,
-      boundary: 'core-policy-required' as const,
+      sideEffectsPerformed: false,
+      boundary: 'core-policy-required',
     }
   },
 })
