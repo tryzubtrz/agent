@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   migrate:
@@ -29,7 +30,6 @@ jobs:
           mkdir -p .github/workflows
           cp /tmp/alter-source/.github/workflows/alter-*.yml .github/workflows/
 
-          # Adapt the migrated project to this repository/default branch.
           find ALTER .github/workflows -type f -print0 | xargs -0 sed -i 's/tryzubtrz\/ai/tryzubtrz\/agent/g'
           find ALTER .github/workflows -type f -print0 | xargs -0 sed -i 's/alter-foundation/main/g'
 
@@ -59,3 +59,17 @@ jobs:
             git commit -m "migrate: move ALTER foundation into agent repository"
             git push origin main
           fi
+
+      - name: Report migration result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          curl --fail-with-body -sS \
+            -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/issues" \
+            -d "{\"title\":\"ALTER migration: $JOB_STATUS\",\"body\":\"Automated cloud migration status report.\"}"
