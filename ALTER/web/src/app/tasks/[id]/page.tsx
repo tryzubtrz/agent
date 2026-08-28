@@ -9,8 +9,8 @@ type PendingAction = { attempt_id?: string | null; operation: string; target?: s
 type Task = { id: string; objective: string; status: string; current_step?: string | null; blocker?: string | null; acceptance_criteria: string[]; pending_action?: PendingAction | null; created_at: string; updated_at: string };
 type Event = { id: number; event_type: string; created_at: string; payload: Record<string, unknown> };
 type TaskPlan = { plan: string; provider: string; mode: string; boundary: string; side_effects_performed: false; created_at: string };
-type TaskResult = { result_summary: string; verification_evidence: string[]; artifact_refs: string[]; acceptance_criteria_met: true; verification_method: "owner_attestation" };
-type ActionResult = { execution_id?: string; attempt_id: string; action_digest: string; operation: string; target?: string | null; succeeded: boolean; result_summary: string; verification_evidence: string[]; artifact_refs: string[]; verification_method: "owner_attestation" };
+type TaskResult = { result_summary: string; verification_evidence: string[]; artifact_refs: string[]; acceptance_criteria_met: true; verification_method: "owner_attestation" | "tool_executor" };
+type ActionResult = { execution_id?: string; attempt_id: string; action_digest: string; operation: string; target?: string | null; succeeded: boolean; result_summary: string; verification_evidence: string[]; artifact_refs: string[]; verification_method: "owner_attestation" | "tool_executor" };
 type Inspector = {
   task: Task;
   meta: Record<string, unknown>;
@@ -82,6 +82,23 @@ export default function TaskPage() {
     finally { setBusy(false); }
   }
 
+  async function executePending() {
+    if (!data?.pending_action_digest) return;
+    setBusy(true);
+    setError("");
+    try {
+      const payload = data.task.status === "awaiting_approval"
+        ? { approval_digest: data.pending_action_digest }
+        : {};
+      await core(`/tasks/${id}/execute-pending`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      await refresh();
+    } catch (err) { setError(err instanceof Error ? err.message : "Executor не зміг виконати активну дію"); }
+    finally { setBusy(false); }
+  }
+
   async function completeTask() {
     const evidence = splitLines(verificationEvidence);
     const artifacts = splitLines(artifactRefs);
@@ -134,6 +151,7 @@ export default function TaskPage() {
   if (!data) return <ModuleShell title="Задача" eyebrow="TASK INSPECTOR"><section style={panel}>{error || "Завантажую…"}</section></ModuleShell>;
   const task = data.task;
   const canPause = ["ready", "executing", "recovering"].includes(task.status);
+  const runtimeExecutable = isRuntimeExecutable(task.pending_action);
 
   return (
     <ModuleShell title="Task Inspector" eyebrow="EXPLAIN · CONTROL · RECOVER">
@@ -184,9 +202,25 @@ export default function TaskPage() {
         <button disabled={busy} onClick={() => void saveMeta()} style={primary}>Зберегти</button>
       </section>
 
-      {task.status === "executing" && task.pending_action && data.pending_action_digest && data.pending_action_attempt_id && (
+      {task.pending_action && data.pending_action_digest && ["executing", "awaiting_approval"].includes(task.status) && runtimeExecutable && (
+        <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12, borderColor: "rgba(93,224,154,.22)" }}>
+          <strong>Реальне виконання через ALTER Executor</strong>
+          <div style={muted}>
+            {task.pending_action.operation} · {task.pending_action.target || "без цілі"} · ризик {task.pending_action.risk}
+          </div>
+          <div style={muted}>ALTER сам виконає підтримуваний read-only tool, запише результат і verification evidence. Вручну вигадувати підтвердження не потрібно.</div>
+          <button disabled={busy} onClick={() => void executePending()} style={primary}>
+            {busy ? "Executor працює…" : task.status === "awaiting_approval" ? "Схвалити й виконати" : "Виконати через ALTER"}
+          </button>
+        </section>
+      )}
+
+      {task.status === "executing" && task.pending_action && data.pending_action_digest && data.pending_action_attempt_id && !runtimeExecutable && (
         <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12 }}>
-          <strong>Перевірка активної дії</strong>
+          <strong>Ручне підтвердження зовнішньої дії</strong>
+          <div style={muted}>
+            Ця дія ще не підтримується ALTER Executor. Заповнюй цей блок лише якщо дію реально виконано поза ALTER і ти маєш фактичні докази.
+          </div>
           <div style={muted}>
             {task.pending_action.operation} · {task.pending_action.target || "без цілі"} · ризик {task.pending_action.risk}
           </div>
@@ -198,7 +232,7 @@ export default function TaskPage() {
           <textarea value={actionEvidence} onChange={(event) => setActionEvidence(event.target.value)} rows={3} placeholder={"Докази перевірки — по одному на рядок"} style={{ ...field, resize: "vertical" }} />
           <textarea value={actionArtifacts} onChange={(event) => setActionArtifacts(event.target.value)} rows={2} placeholder="Артефакти — по одному на рядок (необов’язково)" style={{ ...field, resize: "vertical" }} />
           <button disabled={busy || !actionSummary.trim() || splitLines(actionEvidence).length === 0} onClick={() => void attestActionResult()} style={actionSucceeded ? primary : danger}>
-            {actionSucceeded ? "Підтвердити виконання дії" : "Зафіксувати помилку й відновити"}
+            {actionSucceeded ? "Підтвердити фактичний результат" : "Зафіксувати помилку й відновити"}
           </button>
         </section>
       )}
@@ -210,6 +244,7 @@ export default function TaskPage() {
             <article key={item.execution_id || `${item.action_digest}:${index}`} style={{ borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 9 }}>
               <div style={{ color: item.succeeded ? "#a9efc4" : "#ffaaa7" }}>{item.operation}: {item.succeeded ? "успішно" : "помилка"}</div>
               <div style={resultText}>{item.result_summary}</div>
+              <div style={muted}>Перевірка: {item.verification_method === "tool_executor" ? "ALTER tool evidence" : "підтвердження власника"}</div>
               <ul style={list}>{item.verification_evidence.map((evidence) => <li key={evidence}>{evidence}</li>)}</ul>
               {item.artifact_refs.length > 0 && (
                 <div>
@@ -239,7 +274,8 @@ export default function TaskPage() {
         </section>
       ) : ["ready", "recovering"].includes(task.status) ? (
         <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12 }}>
-          <strong>Підтвердження результату власником</strong>
+          <strong>Підтвердження ручного або зовнішнього результату</strong>
+          <div style={muted}>Використовуй тільки якщо результат реально створено або перевірено поза автоматичним executor-flow.</div>
           <textarea
             aria-label="Підсумок результату"
             value={resultSummary}
@@ -288,6 +324,15 @@ export default function TaskPage() {
       </section>
     </ModuleShell>
   );
+}
+
+function isRuntimeExecutable(action?: PendingAction | null): boolean {
+  if (!action) return false;
+  const target = (action.target || "").trim().toLowerCase();
+  return action.category === "connector"
+    && action.operation === "self_test"
+    && action.risk === "read"
+    && ["neon", "botpress", "github", "vercel"].includes(target);
 }
 
 function splitLines(value: string): string[] {
