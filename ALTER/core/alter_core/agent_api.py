@@ -9,7 +9,11 @@ from pydantic import BaseModel, Field
 
 from .api import _audit, _commit_task_transition_with_record, _get_owned_task, orchestrator
 from .auth import Principal, require_owner
-from .botpress_contract import BotpressContractError, validate_specialist_output
+from .botpress_contract import (
+    BotpressContractError,
+    BotpressInternalLeakError,
+    validate_specialist_output,
+)
 from .botpress_gateway import (
     BotpressGateway,
     BotpressRuntimeError,
@@ -66,11 +70,15 @@ def agent_think(
         )
     except BotpressUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (BotpressRuntimeError, BotpressContractError) as exc:
+    except BotpressRuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except BotpressInternalLeakError as exc:
         raise HTTPException(
             status_code=502,
             detail="ALTER could not produce a safe user-facing response.",
         ) from exc
+    except BotpressContractError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     safe_response, response_redacted = redact_secrets(generated.text)
     redacted = (
