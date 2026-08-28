@@ -253,33 +253,47 @@ class TaskOrchestrator:
         workspace_id: UUID,
         owner_rules: list[PolicyRule] | None = None,
     ) -> Task:
-        def apply(task: Task) -> Task:
-            self._assert_same_workspace(task, workspace_id)
+        return self.store.transition(
+            task_id,
+            lambda task: self.transition_after_human_auth(
+                task,
+                workspace_id=workspace_id,
+                owner_rules=owner_rules,
+            ),
+        )
 
-            if task.status not in {TaskStatus.AWAITING_LOGIN, TaskStatus.AWAITING_MFA}:
-                raise ApprovalMismatchError("Task is not waiting for human authentication.")
-            if task.pending_action is None:
-                raise ApprovalMismatchError("Authenticated task has no pending action.")
+    def transition_after_human_auth(
+        self,
+        task: Task,
+        *,
+        workspace_id: UUID,
+        owner_rules: list[PolicyRule] | None = None,
+    ) -> Task:
+        """Apply the post-authentication policy decision without persisting it."""
+        self._assert_same_workspace(task, workspace_id)
 
-            decision = self.policy_engine.evaluate(task.pending_action, owner_rules or [])
-            if decision.effect == PolicyEffect.DENY:
-                task.status = TaskStatus.BLOCKED_BY_RULE
-                task.current_step = "policy_recheck_after_human_auth"
-                task.blocker = decision.reason
-                task.pending_action = None
-                return task
-            if decision.effect == PolicyEffect.REQUIRE_APPROVAL:
-                task.status = TaskStatus.AWAITING_APPROVAL
-                task.current_step = "approval_after_human_auth"
-                task.blocker = decision.reason
-                return task
+        if task.status not in {TaskStatus.AWAITING_LOGIN, TaskStatus.AWAITING_MFA}:
+            raise ApprovalMismatchError("Task is not waiting for human authentication.")
+        if task.pending_action is None:
+            raise ApprovalMismatchError("Authenticated task has no pending action.")
 
-            task.status = TaskStatus.EXECUTING
-            task.current_step = task.pending_action.operation
-            task.blocker = None
+        decision = self.policy_engine.evaluate(task.pending_action, owner_rules or [])
+        if decision.effect == PolicyEffect.DENY:
+            task.status = TaskStatus.BLOCKED_BY_RULE
+            task.current_step = "policy_recheck_after_human_auth"
+            task.blocker = decision.reason
+            task.pending_action = None
+            return task
+        if decision.effect == PolicyEffect.REQUIRE_APPROVAL:
+            task.status = TaskStatus.AWAITING_APPROVAL
+            task.current_step = "approval_after_human_auth"
+            task.blocker = decision.reason
             return task
 
-        return self.store.transition(task_id, apply)
+        task.status = TaskStatus.EXECUTING
+        task.current_step = task.pending_action.operation
+        task.blocker = None
+        return task
 
     def complete_task(
         self,

@@ -27,6 +27,7 @@ from .api import (
 from .auth import Principal, require_owner
 from .models import ActionRequest, ActionRisk, TaskStatus
 from .orchestrator import ApprovalMismatchError
+from .persistence import PostgresTaskStore
 from .secret_safety import contains_high_confidence_secret, redact_secrets
 
 router = APIRouter()
@@ -244,11 +245,22 @@ def task_control(task_id: UUID, body: TaskControlBody, principal: Principal = De
         if principal.actor_role != "owner":
             raise HTTPException(status_code=403, detail="Only Owner can confirm completion of human authentication.")
         try:
-            saved = orchestrator.resume_after_human_auth(
-                task_id=task_id,
-                workspace_id=principal.workspace_id,
-                owner_rules=policy_store.list_for_workspace(principal.workspace_id),
-            )
+            if isinstance(orchestrator.store, PostgresTaskStore):
+                saved = orchestrator.store.transition_with_policy_rules(
+                    task_id=task_id,
+                    user_id=principal.user_id,
+                    transition=lambda candidate, current_rules: orchestrator.transition_after_human_auth(
+                        candidate,
+                        workspace_id=principal.workspace_id,
+                        owner_rules=current_rules,
+                    ),
+                )
+            else:
+                saved = orchestrator.resume_after_human_auth(
+                    task_id=task_id,
+                    workspace_id=principal.workspace_id,
+                    owner_rules=policy_store.list_for_workspace(principal.workspace_id),
+                )
         except ApprovalMismatchError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         _audit(

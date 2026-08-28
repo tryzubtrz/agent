@@ -13,13 +13,6 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         r"\1[REDACTED]\3",
     ),
     (
-        re.compile(
-            r"(?i)\b((?:proxy-)?authorization\s*[:=]\s*)"
-            r"(basic|bearer|token|apikey)\s+([A-Za-z0-9._~+/=-]{4,})"
-        ),
-        r"\1\2 [REDACTED]",
-    ),
-    (
         re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
         "[REDACTED_JWT]",
     ),
@@ -36,7 +29,8 @@ _SECRET_LABEL = (
     r"|auth(?:orization)?|password|passwd|cookie|pat"
 )
 _SECRET_ASSIGNMENT = re.compile(
-    rf"(?i)\b({_SECRET_LABEL})\s*[:=]\s*([^\s,;]{{6,}})"
+    rf"(?i)\b({_SECRET_LABEL})\s*[:=]\s*"
+    rf"((?:(?:basic|bearer|token|apikey)\s+[^\s,;]{{4,}})|[^\s,;]{{6,}})"
 )
 _SECRET_FIELD_NAME = re.compile(
     rf"(?i)^(?:{_SECRET_LABEL})$"
@@ -45,6 +39,12 @@ _SECRET_FIELD_NAME = re.compile(
 
 def _is_vault_alias(value: str) -> bool:
     return value.strip().lower().startswith("vault:")
+
+
+def _is_vault_reference(value: str) -> bool:
+    parts = value.strip().split(maxsplit=1)
+    candidate = parts[1] if len(parts) == 2 and parts[0].lower() in {"basic", "bearer", "token", "apikey"} else parts[0]
+    return _is_vault_alias(candidate)
 
 
 def redact_secrets(text: str) -> tuple[str, bool]:
@@ -57,7 +57,7 @@ def redact_secrets(text: str) -> tuple[str, bool]:
             safe = updated
     updated = _SECRET_ASSIGNMENT.sub(
         lambda match: match.group(0)
-        if _is_vault_alias(match.group(2))
+        if _is_vault_reference(match.group(2))
         else f"{match.group(1)}=[REDACTED]",
         safe,
     )

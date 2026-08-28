@@ -70,7 +70,17 @@ def test_redactor_covers_basic_authorization_credentials():
     safe, changed = conversation_api._redact(f"Authorization: Basic {credential}")
     assert changed is True
     assert credential not in safe
-    assert safe == "Authorization: Basic [REDACTED]"
+    assert safe == "Authorization=[REDACTED]"
+
+
+def test_redactor_preserves_vault_aliases_in_authorization_headers():
+    for source in (
+        "Authorization: Basic vault:botpress_runtime",
+        "Authorization: Bearer vault:github_connector",
+    ):
+        safe, changed = conversation_api._redact(source)
+        assert changed is False
+        assert safe == source
 
 
 def test_conversation_ai_is_fail_closed_without_runtime_credential(monkeypatch):

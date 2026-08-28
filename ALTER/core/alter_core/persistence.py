@@ -117,6 +117,69 @@ class PostgresTaskStore:
             )
         return task
 
+    def transition_with_policy_rules(
+        self,
+        *,
+        task_id: UUID,
+        user_id: UUID,
+        transition: Callable[[Task, list[PolicyRule]], Task],
+    ) -> Task:
+        """Lock the task, then load and apply the latest policies in one transaction."""
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            row = conn.execute(
+                """
+                SELECT id, workspace_id, owner_user_id, objective, status,
+                       acceptance_criteria, current_step, blocker, pending_action,
+                       created_at, updated_at
+                FROM tasks
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise TaskNotFoundError(str(task_id))
+
+            current = Task.model_validate(row)
+            if current.owner_user_id != user_id:
+                raise PermissionError("Cross-owner task transition denied.")
+            policy_rows = conn.execute(
+                """
+                SELECT id, workspace_id, original_text, category, effect,
+                       enabled, priority, created_at
+                FROM policy_rules
+                WHERE workspace_id = %s
+                ORDER BY priority ASC, created_at ASC
+                """,
+                (current.workspace_id,),
+            ).fetchall()
+            rules = [PolicyRule.model_validate(policy_row) for policy_row in policy_rows]
+            task = transition(current, rules)
+            task.touch()
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = %s,
+                    current_step = %s,
+                    blocker = %s,
+                    pending_action = %s,
+                    updated_at = %s
+                WHERE id = %s AND workspace_id = %s
+                """,
+                (
+                    task.status.value,
+                    task.current_step,
+                    task.blocker,
+                    Jsonb(task.pending_action.model_dump(mode="json"))
+                    if task.pending_action is not None
+                    else None,
+                    task.updated_at,
+                    task.id,
+                    task.workspace_id,
+                ),
+            )
+        return task
+
     def list_for_owner(
         self,
         workspace_id: UUID,

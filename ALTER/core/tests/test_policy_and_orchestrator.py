@@ -1,6 +1,7 @@
 from uuid import uuid4
 
 import pytest
+from alter_core import persistence
 from alter_core.models import (
     ActionRequest,
     ActionRisk,
@@ -14,6 +15,7 @@ from alter_core.orchestrator import (
     InvalidTaskTransitionError,
     TaskOrchestrator,
 )
+from alter_core.persistence import PostgresTaskStore
 from alter_core.policy import PolicyEngine
 
 
@@ -271,6 +273,78 @@ def test_action_guard_runs_against_latest_locked_task_state():
 
     retained = store.get(task.id)
     assert retained.pending_action == first
+
+
+def test_postgres_human_auth_transition_loads_policies_after_task_lock(monkeypatch):
+    orchestrator = TaskOrchestrator()
+    workspace_id = uuid4()
+    owner_user_id = uuid4()
+    task = orchestrator.create_task(
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        objective="Authenticate before reading",
+    )
+    orchestrator.mark_ready(task.id)
+    action = make_action(
+        workspace_id=workspace_id,
+        task_id=task.id,
+        category="authenticated_read",
+        operation="read",
+        requires_human_auth=True,
+    )
+    waiting = orchestrator.request_action(action)
+    deny = PolicyRule(
+        workspace_id=workspace_id,
+        original_text="Block after authentication",
+        category="authenticated_read",
+        effect=PolicyEffect.DENY,
+        priority=1,
+    )
+    queries: list[str] = []
+
+    class Result:
+        def __init__(self, *, one=None, many=None):
+            self.one = one
+            self.many = many or []
+
+        def fetchone(self):
+            return self.one
+
+        def fetchall(self):
+            return self.many
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, _params):
+            normalized = " ".join(query.split())
+            queries.append(normalized)
+            if "FROM tasks" in normalized and "FOR UPDATE" in normalized:
+                return Result(one=waiting.model_dump(mode="python"))
+            if "FROM policy_rules" in normalized:
+                return Result(many=[deny.model_dump(mode="python")])
+            return Result()
+
+    monkeypatch.setattr(persistence, "connect", lambda *_args, **_kwargs: Connection())
+    saved = PostgresTaskStore("postgresql://unused").transition_with_policy_rules(
+        task_id=task.id,
+        user_id=owner_user_id,
+        transition=lambda candidate, current_rules: orchestrator.transition_after_human_auth(
+            candidate,
+            workspace_id=workspace_id,
+            owner_rules=current_rules,
+        ),
+    )
+
+    assert saved.status == TaskStatus.BLOCKED_BY_RULE
+    assert saved.pending_action is None
+    task_lock_index = next(index for index, query in enumerate(queries) if "FOR UPDATE" in query)
+    policy_index = next(index for index, query in enumerate(queries) if "FROM policy_rules" in query)
+    assert task_lock_index < policy_index
 
 
 def test_approval_rechecks_current_policy_and_rejects_stale_authority():
