@@ -14,6 +14,7 @@ from .conversation_api import router as conversation_router
 from .document_api import router as document_router
 from .market_api import router as market_router
 from .media_api import router as media_router
+from .member_auth_api import router as member_auth_router
 from .memory_admin_api import router as memory_admin_router
 from .memory_v2_api import router as memory_v2_router
 from .model_api import router as model_router
@@ -25,6 +26,7 @@ from .vault_api import router as vault_router
 
 for router in (
     access_router,
+    member_auth_router,
     agent_router,
     approval_router,
     automation_tick_router,
