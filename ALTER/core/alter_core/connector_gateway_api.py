@@ -18,6 +18,7 @@ botpress = BotpressGateway()
 
 _POSTHOG_PROJECT_KEY = "phc_z9CGwpT6bvMMD3BNaqb3XMUfSHvDbqR2kfbNENKgvTrf"
 _POSTHOG_CAPTURE_URL = "https://us.i.posthog.com/capture/"
+_SECRET_WORDS = ("token", "secret", "password", "key", "cookie", "authorization")
 
 
 class TelemetryEventBody(BaseModel):
@@ -32,6 +33,51 @@ class TelemetryEventBody(BaseModel):
 
 def _configured(name: str) -> bool:
     return bool(os.getenv(name, "").strip())
+
+
+def _safe_properties(properties: dict[str, str | int | float | bool | None]) -> dict[str, str | int | float | bool | None]:
+    return {
+        key[:80]: value
+        for key, value in list(properties.items())[:30]
+        if not any(secret_word in key.lower() for secret_word in _SECRET_WORDS)
+    }
+
+
+def capture_posthog_system_event(
+    event: str,
+    properties: dict[str, str | int | float | bool | None] | None = None,
+    *,
+    distinct_id: str = "alter-owner-system",
+    surface: str = "core",
+) -> dict[str, object]:
+    safe_properties = _safe_properties(properties or {})
+    payload = {
+        "api_key": _POSTHOG_PROJECT_KEY,
+        "event": event[:120],
+        "properties": {
+            "distinct_id": distinct_id[:120],
+            "app": "ALTER",
+            "surface": surface[:40],
+            **safe_properties,
+        },
+    }
+    request = Request(
+        _POSTHOG_CAPTURE_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "ALTER-Core/0.6"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=10) as response:  # noqa: S310 - fixed PostHog HTTPS host
+            status_code = int(response.status)
+    except HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"PostHog capture returned HTTP {exc.code}") from exc
+    except (URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=502, detail="PostHog capture endpoint is unreachable") from exc
+
+    if status_code < 200 or status_code >= 300:
+        raise HTTPException(status_code=502, detail="PostHog capture was not accepted")
+    return {"accepted": True, "connector": "posthog", "event": event[:120]}
 
 
 def _gateway_registry() -> list[dict[str, Any]]:
@@ -92,41 +138,11 @@ def capture_posthog_event(
     body: TelemetryEventBody,
     principal: Principal = Depends(require_owner),
 ) -> dict[str, object]:
-    safe_properties = {
-        key[:80]: value
-        for key, value in list(body.properties.items())[:30]
-        if not any(secret_word in key.lower() for secret_word in ("token", "secret", "password", "key", "cookie", "authorization"))
-    }
-    payload = {
-        "api_key": _POSTHOG_PROJECT_KEY,
-        "event": body.event,
-        "properties": {
-            "distinct_id": "alter-owner-system",
-            "app": "ALTER",
-            "surface": "core",
-            **safe_properties,
-        },
-    }
-    request = Request(
-        _POSTHOG_CAPTURE_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=10) as response:  # noqa: S310 - fixed PostHog HTTPS host
-            status_code = int(response.status)
-    except HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"PostHog capture returned HTTP {exc.code}") from exc
-    except (URLError, TimeoutError) as exc:
-        raise HTTPException(status_code=502, detail="PostHog capture endpoint is unreachable") from exc
-
-    if status_code < 200 or status_code >= 300:
-        raise HTTPException(status_code=502, detail="PostHog capture was not accepted")
-
+    safe_properties = _safe_properties(body.properties)
+    result = capture_posthog_system_event(body.event, safe_properties)
     _audit(
         principal,
         event_type="connector.posthog.capture",
         payload={"event": body.event, "property_count": len(safe_properties)},
     )
-    return {"accepted": True, "connector": "posthog", "event": body.event}
+    return result
