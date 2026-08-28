@@ -8,6 +8,8 @@ import { core, formatDate } from "@/lib/core-client";
 type Task = { id: string; objective: string; status: string; current_step?: string | null; blocker?: string | null; updated_at: string; acceptance_criteria: string[] };
 type PlannedTask = { task: Task; plan: { plan: string } };
 
+const DEFAULT_ACCEPTANCE_CRITERION = "Запитаний результат створено та підтверджено конкретними доказами.";
+
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [objective, setObjective] = useState("");
@@ -30,11 +32,11 @@ export default function TasksPage() {
     try {
       const task = await core<Task>("/tasks", {
         method: "POST",
-        body: JSON.stringify({ objective: value, acceptance_criteria: [] }),
+        body: JSON.stringify({ objective: value, acceptance_criteria: [DEFAULT_ACCEPTANCE_CRITERION] }),
       });
       await core(`/tasks/${task.id}/meta`, {
         method: "PUT",
-        body: JSON.stringify({ expected_result: null, deadline: null, autonomy: "balanced", sources: [], notes: null }),
+        body: JSON.stringify({ expected_result: value, deadline: null, autonomy: "balanced", sources: [], notes: null }),
       });
 
       try {
@@ -59,7 +61,7 @@ export default function TasksPage() {
     <ModuleShell title="Задачі" eyebrow="OPERATIONS CENTER">
       <section style={{ ...panel, display: "grid", gap: 10 }}>
         <strong>Нова задача</strong>
-        <div style={muted}>Опиши результат. ALTER створить задачу, збереже її в Core і одразу спробує сформувати план — без ручного «Ready».</div>
+        <div style={muted}>Опиши результат. ALTER створить задачу, зафіксує критерій перевірки й одразу спробує сформувати план — без ручного «Ready».</div>
         <textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} placeholder="Що потрібно отримати в результаті?" style={{ ...input, resize: "vertical" }} />
         <button type="button" onClick={() => void createTask()} disabled={busy || !objective.trim()} style={primary}>{busy ? "ALTER планує…" : "Створити й спланувати"}</button>
       </section>
