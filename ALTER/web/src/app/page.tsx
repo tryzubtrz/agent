@@ -35,25 +35,36 @@ type ConnectorState = { connector_key: string; status: string };
 type Message = { role: "user" | "agent"; text: string; created_at?: string | null };
 type Conversation = { messages: Message[]; count: number; persistent: boolean };
 type Session = { authenticated: boolean; role: "owner" | "operator" | "viewer"; capabilities: string[] };
-type ModuleLink = { href: string; label: string; detail: string; icon: Icon; ownerOnly?: boolean };
+type ModuleLink = { href: string; label: string; detail: string; icon: Icon; ownerOnly?: boolean; capability?: string };
 
 const modules: ModuleLink[] = [
-  { href: "/chat", label: "ALTER", detail: "Єдина постійна розмова з памʼяттю", icon: MessageCircle },
-  { href: "/tasks", label: "Задачі", detail: "Планування, контроль і перевірка", icon: ListChecks },
-  { href: "/memory", label: "Памʼять", detail: "Профіль, факти й довготривалі записи", icon: MemoryStick },
-  { href: "/knowledge", label: "Knowledge", detail: "Пошук по памʼяті та документах", icon: Brain },
-  { href: "/documents", label: "Документи", detail: "PDF, DOCX, XLSX та OCR", icon: FileText },
-  { href: "/files", label: "Файли", detail: "Файлові записи та нотатки", icon: Folder },
-  { href: "/models", label: "Моделі", detail: "Cloud і local model registry", icon: Bot },
-  { href: "/gateway", label: "Конектори", detail: "Реальний стан і capabilities", icon: Link2 },
-  { href: "/rules", label: "Правила", detail: "Policy Engine та approvals", icon: ShieldCheck },
+  { href: "/chat", label: "ALTER", detail: "Єдина постійна розмова з памʼяттю", icon: MessageCircle, capability: "conversation" },
+  { href: "/tasks", label: "Задачі", detail: "Планування, контроль і перевірка", icon: ListChecks, capability: "tasks.read" },
+  { href: "/memory", label: "Памʼять", detail: "Профіль, факти й довготривалі записи", icon: MemoryStick, capability: "memory.read" },
+  { href: "/knowledge", label: "Knowledge", detail: "Пошук по памʼяті та документах", icon: Brain, capability: "knowledge" },
+  { href: "/documents", label: "Документи", detail: "PDF, DOCX, XLSX та OCR", icon: FileText, capability: "documents" },
+  { href: "/files", label: "Файли", detail: "Файлові записи та нотатки", icon: Folder, capability: "documents" },
+  { href: "/models", label: "Моделі", detail: "Cloud і local model registry", icon: Bot, capability: "models.read" },
+  { href: "/gateway", label: "Конектори", detail: "Реальний стан і capabilities", icon: Link2, capability: "connectors.read" },
+  { href: "/rules", label: "Правила", detail: "Policy Engine та approvals", icon: ShieldCheck, ownerOnly: true },
   { href: "/vault", label: "Vault", detail: "Зашифровані секрети та aliases", icon: KeyRound, ownerOnly: true },
   { href: "/people", label: "Люди", detail: "RBAC, ролі та запрошення", icon: Users, ownerOnly: true },
   { href: "/settings", label: "Налаштування", detail: "Autonomy, privacy та поведінка", icon: Settings, ownerOnly: true },
-  { href: "/status", label: "System Status", detail: "Що реально працює зараз", icon: Activity },
+  { href: "/status", label: "System Status", detail: "Що реально працює зараз", icon: Activity, capability: "connectors.read" },
 ];
 
 const terminalStatuses = new Set(["done", "failed", "cancelled"]);
+
+function hasCapability(capabilities: string[], required?: string): boolean {
+  if (!required) return true;
+  const caps = new Set(capabilities);
+  if (caps.has("*") || caps.has(required)) return true;
+  if (required.endsWith(".read")) {
+    const base = required.slice(0, -5);
+    return caps.has(base) || caps.has(`${base}.write`);
+  }
+  return false;
+}
 
 export default function HomePage() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -68,29 +79,47 @@ export default function HomePage() {
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      const [healthResult, agentResult, tasksResult, connectorsResult, conversationResult, sessionResult] = await Promise.allSettled([
-        core<Health>("/health"),
-        core<AgentStatus>("/agent/status"),
-        core<Task[]>("/tasks?limit=50"),
-        core<ConnectorState[]>("/connectors"),
-        core<Conversation>("/conversation?limit=6"),
-        fetch("/api/auth/session", { cache: "no-store" }).then(async (response) => response.ok ? response.json() as Promise<Session> : null),
+      let liveSession: Session | null = null;
+      try {
+        const response = await fetch("/api/auth/session", { cache: "no-store" });
+        if (response.ok) liveSession = await response.json() as Session;
+      } catch {
+        liveSession = null;
+      }
+      if (cancelled) return;
+      setSession(liveSession);
+
+      const owner = liveSession?.role === "owner";
+      const caps = liveSession?.capabilities ?? [];
+      const permitted = (capability: string) => owner || hasCapability(caps, capability);
+
+      const healthPromise = core<Health>("/health");
+      const agentPromise = permitted("conversation") ? core<AgentStatus>("/conversation/status") : Promise.resolve(null);
+      const tasksPromise = permitted("tasks.read") ? core<Task[]>("/tasks?limit=50") : Promise.resolve([] as Task[]);
+      const connectorsPromise = permitted("connectors.read") ? core<ConnectorState[]>("/connectors") : Promise.resolve([] as ConnectorState[]);
+      const conversationPromise = permitted("conversation") ? core<Conversation>("/conversation?limit=6") : Promise.resolve(null);
+
+      const [healthResult, agentResult, tasksResult, connectorsResult, conversationResult] = await Promise.allSettled([
+        healthPromise,
+        agentPromise,
+        tasksPromise,
+        connectorsPromise,
+        conversationPromise,
       ]);
       if (cancelled) return;
 
       if (healthResult.status === "fulfilled") setHealth(healthResult.value);
-      if (agentResult.status === "fulfilled") setAgent(agentResult.value);
+      if (agentResult.status === "fulfilled" && agentResult.value) setAgent(agentResult.value);
       if (tasksResult.status === "fulfilled") setTasks(tasksResult.value);
       if (connectorsResult.status === "fulfilled") setConnectors(connectorsResult.value);
-      if (conversationResult.status === "fulfilled") setConversation(conversationResult.value);
-      if (sessionResult.status === "fulfilled" && sessionResult.value) setSession(sessionResult.value);
+      if (conversationResult.status === "fulfilled" && conversationResult.value) setConversation(conversationResult.value);
 
       const failed: string[] = [];
       if (healthResult.status === "rejected") failed.push("Core health");
-      if (agentResult.status === "rejected") failed.push("AI status");
-      if (tasksResult.status === "rejected") failed.push("Tasks");
-      if (connectorsResult.status === "rejected") failed.push("Connectors");
-      if (conversationResult.status === "rejected") failed.push("Conversation");
+      if (permitted("conversation") && agentResult.status === "rejected") failed.push("AI status");
+      if (permitted("tasks.read") && tasksResult.status === "rejected") failed.push("Tasks");
+      if (permitted("connectors.read") && connectorsResult.status === "rejected") failed.push("Connectors");
+      if (permitted("conversation") && conversationResult.status === "rejected") failed.push("Conversation");
       setWarnings(failed);
       setLoading(false);
     }
@@ -114,10 +143,14 @@ export default function HomePage() {
     [conversation],
   );
 
-  const visibleModules = useMemo(
-    () => modules.filter((module) => !module.ownerOnly || session?.role === "owner"),
-    [session],
-  );
+  const visibleModules = useMemo(() => {
+    if (!session) return [];
+    if (session.role === "owner") return modules;
+    return modules.filter((module) => !module.ownerOnly && hasCapability(session.capabilities, module.capability));
+  }, [session]);
+
+  const canChat = session?.role === "owner" || hasCapability(session?.capabilities ?? [], "conversation");
+  const canReadTasks = session?.role === "owner" || hasCapability(session?.capabilities ?? [], "tasks.read");
 
   return (
     <main style={shell}>
@@ -126,59 +159,63 @@ export default function HomePage() {
           <div style={eyebrow}>ALTER · CONTROL PLANE</div>
           <h1 style={title}>Головна</h1>
         </div>
-        <Link href="/status" style={statusLink}><Activity size={17} /> Статус</Link>
+        {(session?.role === "owner" || hasCapability(session?.capabilities ?? [], "connectors.read")) && <Link href="/status" style={statusLink}><Activity size={17} /> Статус</Link>}
       </header>
 
       <section style={statusGrid}>
         <Status label="Core" value={health?.status === "ok" ? "online" : loading ? "checking" : "offline"} good={health?.status === "ok"} />
         <Status label="Storage" value={health?.storage ?? "—"} good={health?.storage === "postgres"} />
-        <Status label="AI" value={agent?.configured ? "connected" : loading ? "checking" : "waiting"} good={Boolean(agent?.configured)} />
-        <Status label="Connectors" value={`${connectedCount} connected`} good={connectedCount > 0} />
+        {canChat && <Status label="AI" value={agent?.configured ? "connected" : loading ? "checking" : "waiting"} good={Boolean(agent?.configured)} />}
+        {(session?.role === "owner" || hasCapability(session?.capabilities ?? [], "connectors.read")) && <Status label="Connectors" value={`${connectedCount} connected`} good={connectedCount > 0} />}
       </section>
 
       {warnings.length > 0 && (
         <section style={warningBox}>
-          Частина модулів недоступна: {warnings.join(", ")}. Решта dashboard продовжує працювати.
+          Частина дозволених модулів недоступна: {warnings.join(", ")}. Решта dashboard продовжує працювати.
         </section>
       )}
 
-      <section style={{ ...panel, ...hero }}>
-        <div style={heroIcon}><MessageCircle size={24} /></div>
-        <div style={{ minWidth: 0 }}>
-          <div style={eyebrow}>ЄДИНА РОЗМОВА · POSTGRES MEMORY</div>
-          <h2 style={sectionTitle}>Поговорити з ALTER</h2>
-          <p style={description}>
-            {latestAgentMessage
-              ? latestAgentMessage.text
-              : "Чат зберігає історію, використовує памʼять і knowledge context. Тут більше немає окремого дубльованого чату."}
-          </p>
-        </div>
-        <Link href="/chat" style={primaryAction}>Відкрити чат</Link>
-      </section>
+      {canChat && (
+        <section style={{ ...panel, ...hero }}>
+          <div style={heroIcon}><MessageCircle size={24} /></div>
+          <div style={{ minWidth: 0 }}>
+            <div style={eyebrow}>ЄДИНА РОЗМОВА · POSTGRES MEMORY</div>
+            <h2 style={sectionTitle}>Поговорити з ALTER</h2>
+            <p style={description}>
+              {latestAgentMessage
+                ? latestAgentMessage.text
+                : "Чат зберігає історію, використовує памʼять і knowledge context. Тут більше немає окремого дубльованого чату."}
+            </p>
+          </div>
+          <Link href="/chat" style={primaryAction}>Відкрити чат</Link>
+        </section>
+      )}
 
-      <section style={{ ...panel, marginTop: 12 }}>
-        <div style={sectionHead}>
-          <div>
-            <div style={eyebrow}>ПОТОЧНА ЗАДАЧА · LIVE CORE STATE</div>
-            <h2 style={sectionTitle}>{currentTask?.objective ?? "Немає активної задачі"}</h2>
+      {canReadTasks && (
+        <section style={{ ...panel, marginTop: 12 }}>
+          <div style={sectionHead}>
+            <div>
+              <div style={eyebrow}>ПОТОЧНА ЗАДАЧА · LIVE CORE STATE</div>
+              <h2 style={sectionTitle}>{currentTask?.objective ?? "Немає активної задачі"}</h2>
+            </div>
+            <Link href="/tasks" style={secondaryAction}>Усі задачі</Link>
           </div>
-          <Link href="/tasks" style={secondaryAction}>Усі задачі</Link>
-        </div>
-        {currentTask ? (
-          <div style={taskMeta}>
-            <span><b>Статус:</b> {currentTask.status}</span>
-            <span><b>Крок:</b> {currentTask.current_step || "—"}</span>
-            <span><b>Оновлено:</b> {formatDate(currentTask.updated_at)}</span>
-            {currentTask.blocker && <span style={{ color: "#ffd28b" }}><b>Блокер:</b> {currentTask.blocker}</span>}
-            <Link href={`/tasks/${currentTask.id}`} style={primaryAction}>Відкрити Task Inspector</Link>
-          </div>
-        ) : (
-          <div style={taskMeta}>
-            <span style={description}>Створи задачу — ALTER одразу спробує сформувати перевірений план.</span>
-            <Link href="/tasks" style={primaryAction}>Створити задачу</Link>
-          </div>
-        )}
-      </section>
+          {currentTask ? (
+            <div style={taskMeta}>
+              <span><b>Статус:</b> {currentTask.status}</span>
+              <span><b>Крок:</b> {currentTask.current_step || "—"}</span>
+              <span><b>Оновлено:</b> {formatDate(currentTask.updated_at)}</span>
+              {currentTask.blocker && <span style={{ color: "#ffd28b" }}><b>Блокер:</b> {currentTask.blocker}</span>}
+              <Link href={`/tasks/${currentTask.id}`} style={primaryAction}>Відкрити Task Inspector</Link>
+            </div>
+          ) : (
+            <div style={taskMeta}>
+              <span style={description}>Створи задачу — ALTER одразу спробує сформувати перевірений план.</span>
+              <Link href="/tasks" style={primaryAction}>Створити задачу</Link>
+            </div>
+          )}
+        </section>
+      )}
 
       <section style={{ marginTop: 16 }}>
         <div style={sectionHead}><div><div style={eyebrow}>МОДУЛІ</div><h2 style={sectionTitle}>Одна функція — одна сторінка</h2></div></div>
@@ -194,7 +231,7 @@ export default function HomePage() {
       </section>
 
       <footer style={footer}>
-        Browser/Android control залишаються відкладеними. Інші модулі показуються тільки там, де вже існує реальна реалізація.
+        Browser/Android control залишаються відкладеними. Інші модулі показуються тільки там, де вже існує реальна реалізація і є право доступу.
       </footer>
     </main>
   );
@@ -218,7 +255,7 @@ const description: React.CSSProperties = { color: "rgba(255,255,255,.58)", fontS
 const panel: React.CSSProperties = { border: "1px solid rgba(255,255,255,.1)", background: "rgba(255,255,255,.035)", borderRadius: 20, padding: 14 };
 const hero: React.CSSProperties = { display: "grid", gridTemplateColumns: "50px minmax(0,1fr) auto", gap: 12, alignItems: "center" };
 const heroIcon: React.CSSProperties = { width: 50, height: 50, display: "grid", placeItems: "center", borderRadius: 16, color: "#c6bfff", background: "rgba(118,102,255,.12)", border: "1px solid rgba(143,126,255,.24)" };
-const statusGrid: React.CSSProperties = { display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 8, marginBottom: 12 };
+const statusGrid: React.CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(105px,1fr))", gap: 8, marginBottom: 12 };
 const statusCard: React.CSSProperties = { minWidth: 0, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.025)", borderRadius: 15, padding: 10, display: "grid", gap: 4 };
 const statusLabel: React.CSSProperties = { color: "rgba(255,255,255,.42)", fontSize: 9, textTransform: "uppercase", letterSpacing: ".08em" };
 const statusLink: React.CSSProperties = { display: "flex", alignItems: "center", gap: 6, minHeight: 40, padding: "0 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,.1)", color: "#d8d4eb", textDecoration: "none", fontWeight: 700, fontSize: 12 };
