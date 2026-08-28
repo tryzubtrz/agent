@@ -7,25 +7,43 @@ import { core, formatDate } from "@/lib/core-client";
 
 type Task = { id: string; objective: string; status: string; current_step?: string | null; blocker?: string | null; updated_at: string; acceptance_criteria: string[] };
 type PlannedTask = { task: Task; plan: { plan: string } };
+type Session = { authenticated: boolean; role: "owner" | "operator" | "viewer"; capabilities: string[] };
 
 const DEFAULT_ACCEPTANCE_CRITERION = "Запитаний результат створено та підтверджено конкретними доказами.";
 
+function hasCapability(session: Session | null, required: string): boolean {
+  if (!session) return false;
+  if (session.role === "owner") return true;
+  const caps = new Set(session.capabilities);
+  return caps.has("*") || caps.has(required);
+}
+
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [session, setSession] = useState<Session | null>(null);
   const [objective, setObjective] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   const refresh = useCallback(async () => {
-    try { setTasks(await core<Task[]>("/tasks?limit=250")); setError(""); }
-    catch (err) { setError(err instanceof Error ? err.message : "Не вдалося завантажити задачі"); }
+    try {
+      const [items, sessionResponse] = await Promise.all([
+        core<Task[]>("/tasks?limit=250"),
+        fetch("/api/auth/session", { cache: "no-store" }),
+      ]);
+      setTasks(items);
+      if (sessionResponse.ok) setSession(await sessionResponse.json() as Session);
+      setError("");
+    } catch (err) { setError(err instanceof Error ? err.message : "Не вдалося завантажити задачі"); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
 
+  const canWrite = hasCapability(session, "tasks.write");
+
   async function createTask() {
     const value = objective.trim();
-    if (!value || busy) return;
+    if (!value || busy || !canWrite) return;
     setBusy(true);
     setError("");
     setNotice("");
@@ -59,12 +77,18 @@ export default function TasksPage() {
 
   return (
     <ModuleShell title="Задачі" eyebrow="OPERATIONS CENTER">
-      <section style={{ ...panel, display: "grid", gap: 10 }}>
-        <strong>Нова задача</strong>
-        <div style={muted}>Опиши результат. ALTER створить задачу, зафіксує критерій перевірки й одразу спробує сформувати план — без ручного «Ready».</div>
-        <textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} placeholder="Що потрібно отримати в результаті?" style={{ ...input, resize: "vertical" }} />
-        <button type="button" onClick={() => void createTask()} disabled={busy || !objective.trim()} style={primary}>{busy ? "ALTER планує…" : "Створити й спланувати"}</button>
-      </section>
+      {canWrite ? (
+        <section style={{ ...panel, display: "grid", gap: 10 }}>
+          <strong>Нова задача</strong>
+          <div style={muted}>Опиши результат. ALTER створить задачу, зафіксує критерій перевірки й одразу спробує сформувати план — без ручного «Ready».</div>
+          <textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} placeholder="Що потрібно отримати в результаті?" style={{ ...input, resize: "vertical" }} />
+          <button type="button" onClick={() => void createTask()} disabled={busy || !objective.trim()} style={primary}>{busy ? "ALTER планує…" : "Створити й спланувати"}</button>
+        </section>
+      ) : (
+        <section style={{ ...panel, color: "rgba(255,255,255,.62)" }}>
+          Режим перегляду: ти можеш читати задачі й їхні результати, але не створювати та не змінювати їх.
+        </section>
+      )}
       {notice && <section style={{ ...panel, marginTop: 12, color: "#9af0bd" }}>{notice}</section>}
       {error && <section style={{ ...panel, marginTop: 12, color: "#ffaaa7" }}>{error}</section>}
       <section style={{ display: "grid", gap: 10, marginTop: 14 }}>
