@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from .api import _audit, _memory_fallback, memory_store
 from .auth import Principal, require_owner
+from .persistence import PostgresMemoryStore
 
 router = APIRouter()
 
@@ -19,6 +21,7 @@ _DEFAULT_CAPABILITIES: dict[str, list[str]] = {
     "operator": ["tasks.read", "tasks.write", "conversation", "documents", "knowledge", "calendar", "contacts", "automations", "notifications"],
     "viewer": ["tasks.read", "memory.read", "audit.read", "connectors.read", "models.read", "knowledge", "calendar.read", "contacts.read", "notifications.read"],
 }
+_invite_redeem_lock = RLock()
 
 
 class InviteBody(BaseModel):
@@ -51,6 +54,41 @@ def _put(principal: Principal, namespace: str, key: str, value: dict[str, Any]) 
 
 def _hash(code: str) -> str:
     return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def _redeem_values(
+    invite_id: str,
+    invite: dict[str, Any],
+    *,
+    now: datetime,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate a locked invite and return its updated invite/member pair."""
+    if invite.get("revoked") or invite.get("redeemed_at"):
+        raise HTTPException(status_code=409, detail="Invitation is no longer active")
+    try:
+        expires_at = datetime.fromisoformat(str(invite["expires_at"]).replace("Z", "+00:00"))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="Invitation metadata is invalid") from exc
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
+        raise HTTPException(status_code=410, detail="Invitation has expired")
+
+    member_id = str(uuid4())
+    member = {
+        "id": member_id,
+        "label": invite.get("label") or "Member",
+        "role": invite.get("role") or "viewer",
+        "capabilities": invite.get("capabilities") or [],
+        "active": True,
+        "created_at": now.isoformat(),
+        "last_login_at": now.isoformat(),
+        "invite_id": invite_id,
+        "deleted": False,
+    }
+    updated_invite = dict(invite)
+    updated_invite["redeemed_at"] = now.isoformat()
+    return updated_invite, member
 
 
 @router.get("/api/access/members")
@@ -111,41 +149,46 @@ def create_invite(body: InviteBody, principal: Principal = Depends(require_owner
 def redeem_invite(body: RedeemBody, principal: Principal = Depends(require_owner)) -> dict[str, Any]:
     digest = _hash(body.code.strip())
     now = datetime.now(timezone.utc)
-    match: tuple[str, dict[str, Any]] | None = None
-    for row in _rows(principal, "access.invite"):
-        value = row.get("value")
-        if isinstance(value, dict) and secrets.compare_digest(str(value.get("code_hash") or ""), digest):
-            match = (str(row.get("key")), value)
-            break
-    if match is None:
-        raise HTTPException(status_code=401, detail="Invalid invitation code")
-    invite_id, invite = match
-    if invite.get("revoked") or invite.get("redeemed_at"):
-        raise HTTPException(status_code=409, detail="Invitation is no longer active")
-    try:
-        expires_at = datetime.fromisoformat(str(invite["expires_at"]).replace("Z", "+00:00"))
-    except (KeyError, ValueError) as exc:
-        raise HTTPException(status_code=409, detail="Invitation metadata is invalid") from exc
-    if expires_at <= now:
-        raise HTTPException(status_code=410, detail="Invitation has expired")
+    if memory_store is not None:
+        if not isinstance(memory_store, PostgresMemoryStore):
+            raise HTTPException(status_code=503, detail="Atomic invitation storage is unavailable")
+        member = memory_store.redeem_invite(
+            workspace_id=principal.workspace_id,
+            user_id=principal.user_id,
+            code_hash=digest,
+            transition=lambda invite_id, invite: _redeem_values(invite_id, invite, now=now),
+        )
+        if member is None:
+            raise HTTPException(status_code=401, detail="Invalid invitation code")
+    else:
+        with _invite_redeem_lock:
+            match: tuple[str, dict[str, Any]] | None = None
+            for (workspace_id, user_id, namespace, key), value in _memory_fallback.items():
+                if (
+                    workspace_id == principal.workspace_id
+                    and user_id == principal.user_id
+                    and namespace == "access.invite"
+                    and isinstance(value, dict)
+                    and secrets.compare_digest(str(value.get("code_hash") or ""), digest)
+                ):
+                    match = (key, value)
+                    break
+            if match is None:
+                raise HTTPException(status_code=401, detail="Invalid invitation code")
+            invite_id, invite = match
+            updated_invite, member = _redeem_values(invite_id, invite, now=now)
+            _memory_fallback[(principal.workspace_id, principal.user_id, "access.invite", invite_id)] = updated_invite
+            _memory_fallback[(principal.workspace_id, principal.user_id, "access.member", str(member["id"]))] = member
 
-    member_id = str(uuid4())
-    member = {
-        "id": member_id,
-        "label": invite.get("label") or "Member",
-        "role": invite.get("role") or "viewer",
-        "capabilities": invite.get("capabilities") or [],
-        "active": True,
-        "created_at": now.isoformat(),
-        "last_login_at": now.isoformat(),
-        "invite_id": invite_id,
-        "deleted": False,
-    }
-    invite = dict(invite)
-    invite["redeemed_at"] = now.isoformat()
-    _put(principal, "access.invite", invite_id, invite)
-    _put(principal, "access.member", member_id, member)
-    _audit(principal, event_type="access.invite.redeemed", payload={"invite_id": invite_id, "member_id": member_id, "role": member["role"]})
+    _audit(
+        principal,
+        event_type="access.invite.redeemed",
+        payload={
+            "invite_id": str(member["invite_id"]),
+            "member_id": str(member["id"]),
+            "role": member["role"],
+        },
+    )
     return member
 
 

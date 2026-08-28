@@ -53,6 +53,8 @@ class TaskStore(Protocol):
         workspace_id: UUID,
         owner_user_id: UUID,
         *,
+        status: TaskStatus | None = None,
+        require_pending_action: bool = False,
         limit: int = 100,
     ) -> list[Task]: ...
 
@@ -103,12 +105,16 @@ class InMemoryTaskStore:
         workspace_id: UUID,
         owner_user_id: UUID,
         *,
+        status: TaskStatus | None = None,
+        require_pending_action: bool = False,
         limit: int = 100,
     ) -> list[Task]:
         items = [
             task
             for task in self._tasks.values()
             if task.workspace_id == workspace_id and task.owner_user_id == owner_user_id
+            and (status is None or task.status == status)
+            and (not require_pending_action or task.pending_action is not None)
         ]
         items.sort(key=lambda task: task.updated_at, reverse=True)
         return items[:limit]
@@ -595,21 +601,15 @@ class TaskOrchestrator:
         owner_user_id: UUID,
         action_digest: str,
     ) -> tuple[Task, Approval]:
-        def apply(task: Task) -> Task:
-            self._assert_same_workspace(task, workspace_id)
-            if task.owner_user_id != owner_user_id:
-                raise PermissionError("Cross-owner task transition denied.")
-            if task.status != TaskStatus.AWAITING_APPROVAL or task.pending_action is None:
-                raise ApprovalMismatchError("Task is not awaiting approval.")
-            if task.pending_action.digest() != action_digest:
-                raise ApprovalMismatchError("Rejection does not match the pending action.")
-            task.status = TaskStatus.PAUSED
-            task.current_step = "owner_rejected_action"
-            task.blocker = "Owner rejected the pending action."
-            task.pending_action = None
-            return task
-
-        task = self.store.transition(task_id, apply)
+        task = self.store.transition(
+            task_id,
+            lambda candidate: self.transition_pending_rejection(
+                candidate,
+                workspace_id=workspace_id,
+                owner_user_id=owner_user_id,
+                action_digest=action_digest,
+            ),
+        )
         rejection = Approval(
             workspace_id=workspace_id,
             task_id=task.id,
@@ -617,6 +617,28 @@ class TaskOrchestrator:
             approved=False,
         )
         return task, rejection
+
+    def transition_pending_rejection(
+        self,
+        task: Task,
+        *,
+        workspace_id: UUID,
+        owner_user_id: UUID,
+        action_digest: str,
+    ) -> Task:
+        """Validate and apply an Owner rejection without persisting it."""
+        self._assert_same_workspace(task, workspace_id)
+        if task.owner_user_id != owner_user_id:
+            raise PermissionError("Cross-owner task transition denied.")
+        if task.status != TaskStatus.AWAITING_APPROVAL or task.pending_action is None:
+            raise ApprovalMismatchError("Task is not awaiting approval.")
+        if task.pending_action.digest() != action_digest:
+            raise ApprovalMismatchError("Rejection does not match the pending action.")
+        task.status = TaskStatus.PAUSED
+        task.current_step = "owner_rejected_action"
+        task.blocker = "Owner rejected the pending action."
+        task.pending_action = None
+        return task
 
     def _transition_with_latest_rules(
         self,

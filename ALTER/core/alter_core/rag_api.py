@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from .api import _memory_fallback, memory_store
 from .auth import Principal, require_owner
+from .memory_safety import is_rag_excluded_namespace
 from .rag_engine import retrieve_rows
 
 router = APIRouter()
@@ -23,14 +24,18 @@ def knowledge_rows(principal: Principal, *, limit: int = 1200) -> list[dict[str,
             workspace_id=principal.workspace_id,
             user_id=principal.user_id,
             namespace=None,
+            exclude_rag_internal=True,
+            exclude_rag_conversation=True,
             limit=min(limit, 2000),
         )
     rows = [
         {"namespace": namespace, "key": key, "value": value}
         for (workspace_id, user_id, namespace, key), value in _memory_fallback.items()
-        if workspace_id == principal.workspace_id and user_id == principal.user_id
+        if workspace_id == principal.workspace_id
+        and user_id == principal.user_id
+        and not is_rag_excluded_namespace(namespace)
     ]
-    return rows[:limit]
+    return list(reversed(rows))[:limit]
 
 
 @router.post("/api/rag/search")

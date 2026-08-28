@@ -12,6 +12,12 @@ def is_protected_memory_namespace(namespace: str) -> bool:
     return normalized.startswith(("_vault", "vault_secure"))
 
 
+def is_internal_memory_namespace(namespace: str) -> bool:
+    """Keep Vault and access-control records behind their dedicated APIs."""
+    normalized = normalize_memory_namespace(namespace)
+    return is_protected_memory_namespace(normalized) or normalized.startswith("access.")
+
+
 def is_rag_excluded_namespace(
     namespace: str,
     *,
@@ -21,6 +27,6 @@ def is_rag_excluded_namespace(
     normalized = normalize_memory_namespace(namespace)
     if not normalized:
         return True
-    if is_protected_memory_namespace(normalized) or normalized.startswith("access."):
+    if is_internal_memory_namespace(normalized):
         return True
     return exclude_conversation and normalized.startswith("conversation")

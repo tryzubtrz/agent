@@ -93,12 +93,21 @@ def _tokens(text: str) -> set[str]:
 
 def _knowledge_rows(principal: Principal) -> list[dict[str, Any]]:
     if memory_store is not None:
-        return memory_store.list_for_user(workspace_id=principal.workspace_id, user_id=principal.user_id, namespace=None, limit=250)
+        return memory_store.list_for_user(
+            workspace_id=principal.workspace_id,
+            user_id=principal.user_id,
+            namespace=None,
+            exclude_rag_internal=True,
+            exclude_rag_conversation=True,
+            limit=250,
+        )
     return [
         {"namespace": namespace, "key": key, "value": value}
         for (workspace_id, user_id, namespace, key), value in _memory_fallback.items()
-        if workspace_id == principal.workspace_id and user_id == principal.user_id
-    ][:250]
+        if workspace_id == principal.workspace_id
+        and user_id == principal.user_id
+        and not is_rag_excluded_namespace(namespace)
+    ][-250:][::-1]
 
 
 def _rag(principal: Principal, query: str) -> list[dict[str, Any]]:

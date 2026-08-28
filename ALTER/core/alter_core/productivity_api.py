@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 from html import unescape
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import urljoin, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -25,6 +25,7 @@ from .api import (
     policy_store,
 )
 from .auth import Principal, require_owner
+from .memory_safety import is_rag_excluded_namespace
 from .models import ActionRequest, ActionRisk, TaskStatus
 from .orchestrator import ApprovalMismatchError, InvalidTaskTransitionError
 from .secret_safety import contains_high_confidence_secret, redact_secrets
@@ -97,6 +98,18 @@ class ResearchUrlBody(BaseModel):
     url: str = Field(min_length=8, max_length=2000)
 
 
+class NoResearchRedirectHandler(HTTPRedirectHandler):
+    """Expose redirects to ALTER so every destination is SSRF-validated."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201
+        return None
+
+
+_RESEARCH_OPENER = build_opener(NoResearchRedirectHandler())
+_RESEARCH_REDIRECT_CODES = {301, 302, 303, 307, 308}
+_MAX_RESEARCH_REDIRECTS = 5
+
+
 def _memory_list(
     principal: Principal,
     namespace: str | None = None,
@@ -141,6 +154,26 @@ def _memory_put(principal: Principal, namespace: str, key: str, value: Any) -> d
         )
     _memory_fallback[(principal.workspace_id, principal.user_id, namespace, key)] = value
     return {"namespace": namespace, "key": key, "value": value}
+
+
+def _knowledge_rows(principal: Principal, *, limit: int = 250) -> list[dict[str, Any]]:
+    """Load newest searchable rows after excluding internal namespaces."""
+    if memory_store is not None:
+        return memory_store.list_for_user(
+            workspace_id=principal.workspace_id,
+            user_id=principal.user_id,
+            namespace=None,
+            exclude_rag_internal=True,
+            limit=limit,
+        )
+    rows = [
+        {"namespace": namespace, "key": key, "value": value}
+        for (workspace_id, user_id, namespace, key), value in _memory_fallback.items()
+        if workspace_id == principal.workspace_id
+        and user_id == principal.user_id
+        and not is_rag_excluded_namespace(namespace, exclude_conversation=False)
+    ]
+    return list(reversed(rows))[:limit]
 
 
 def _is_deleted(item: dict[str, Any]) -> bool:
@@ -325,7 +358,7 @@ def knowledge_search(body: KnowledgeSearchBody, principal: Principal = Depends(r
     query_tokens = _tokens(body.query)
     if not query_tokens:
         return {"query": body.query, "results": []}
-    rows = _memory_list(principal, None, 250)
+    rows = _knowledge_rows(principal, limit=250)
     results: list[dict[str, Any]] = []
     allowed = set(body.namespaces)
     for row in rows:
@@ -508,6 +541,36 @@ def _validate_public_url(raw_url: str) -> str:
     return raw_url.strip()
 
 
+def _open_public_research_url(raw_url: str):  # noqa: ANN201
+    """Open a public URL while validating every redirect before following it."""
+    current_url = _validate_public_url(raw_url)
+    for redirect_count in range(_MAX_RESEARCH_REDIRECTS + 1):
+        request = Request(
+            current_url,
+            headers={
+                "User-Agent": "ALTER/1.0 research-reader",
+                "Accept": "text/html,text/plain,application/json;q=0.9,*/*;q=0.1",
+            },
+            method="GET",
+        )
+        try:
+            return _RESEARCH_OPENER.open(request, timeout=12), current_url  # noqa: S310 - every destination is validated
+        except HTTPError as exc:
+            if exc.code not in _RESEARCH_REDIRECT_CODES:
+                exc.close()
+                raise HTTPException(status_code=502, detail=f"Source returned HTTP {exc.code}") from exc
+            location = exc.headers.get("Location") if exc.headers is not None else None
+            exc.close()
+            if not location:
+                raise HTTPException(status_code=502, detail="Source returned a redirect without a destination") from exc
+            if redirect_count >= _MAX_RESEARCH_REDIRECTS:
+                raise HTTPException(status_code=508, detail="Source exceeded the redirect limit") from exc
+            current_url = _validate_public_url(urljoin(current_url, location))
+        except (URLError, TimeoutError) as exc:
+            raise HTTPException(status_code=502, detail="Source is unreachable") from exc
+    raise HTTPException(status_code=508, detail="Source exceeded the redirect limit")
+
+
 def _html_to_text(html: str) -> str:
     html = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", html)
     html = re.sub(r"(?i)<br\s*/?>", "\n", html)
@@ -521,17 +584,14 @@ def _html_to_text(html: str) -> str:
 
 @router.post("/api/research/fetch")
 def research_fetch(body: ResearchUrlBody, principal: Principal = Depends(require_owner)) -> dict[str, Any]:
-    url = _validate_public_url(body.url)
-    request = Request(url, headers={"User-Agent": "ALTER/1.0 research-reader", "Accept": "text/html,text/plain,application/json;q=0.9,*/*;q=0.1"}, method="GET")
     try:
-        with urlopen(request, timeout=12) as response:  # noqa: S310 - destination is SSRF-validated above
+        response, final_url = _open_public_research_url(body.url)
+        with response:
             content_type = response.headers.get("content-type", "")
             raw = response.read(1_000_001)
-            final_url = response.geturl()
-    except HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Source returned HTTP {exc.code}") from exc
-    except (URLError, TimeoutError) as exc:
-        raise HTTPException(status_code=502, detail="Source is unreachable") from exc
+            final_url = response.geturl() or final_url
+    except HTTPException:
+        raise
     if len(raw) > 1_000_000:
         raise HTTPException(status_code=413, detail="Source is larger than the 1 MB research limit")
     charset_match = re.search(r"charset=([\w-]+)", content_type, flags=re.I)

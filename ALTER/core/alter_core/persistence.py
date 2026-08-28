@@ -8,7 +8,7 @@ from psycopg import connect
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .models import Approval, PolicyRule, Task
+from .models import Approval, PolicyRule, Task, TaskStatus
 from .orchestrator import TaskNotFoundError
 
 
@@ -50,6 +50,61 @@ def _write_task(conn: Any, task: Task) -> None:
             task.updated_at,
             task.id,
             task.workspace_id,
+        ),
+    )
+
+
+def _write_approval(
+    conn: Any,
+    approval: Approval,
+    *,
+    approved_by: UUID | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO approvals (
+            id, workspace_id, task_id, action_digest, approved,
+            approved_by, created_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (task_id, action_digest) DO UPDATE SET
+            approved = EXCLUDED.approved,
+            approved_by = EXCLUDED.approved_by
+        """,
+        (
+            approval.id,
+            approval.workspace_id,
+            approval.task_id,
+            approval.action_digest,
+            approval.approved,
+            approved_by,
+            approval.created_at,
+        ),
+    )
+
+
+def _write_audit_event(
+    conn: Any,
+    *,
+    workspace_id: UUID,
+    event_type: str,
+    actor_type: str,
+    actor_id: str | None,
+    task_id: UUID | None,
+    payload: dict[str, Any],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO audit_events (
+            workspace_id, task_id, actor_type, actor_id, event_type, payload
+        ) VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (
+            workspace_id,
+            task_id,
+            actor_type,
+            actor_id,
+            event_type,
+            Jsonb(payload),
         ),
     )
 
@@ -152,26 +207,78 @@ class PostgresTaskStore:
             _write_task(conn, task)
         return task
 
+    def transition_with_decision(
+        self,
+        *,
+        task_id: UUID,
+        user_id: UUID,
+        transition: Callable[[Task, list[PolicyRule]], Task],
+        approval_factory: Callable[[Task], Approval | None],
+        approved_by: UUID,
+        actor_type: str,
+        actor_id: str | None,
+        audit_factory: Callable[[Task, Approval | None], tuple[str, dict[str, Any]]],
+    ) -> tuple[Task, Approval | None]:
+        """Commit a task decision, approval evidence, and audit event atomically."""
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            current = _lock_task(conn, task_id)
+            if current.owner_user_id != user_id:
+                raise PermissionError("Cross-owner task transition denied.")
+            policy_rows = conn.execute(
+                """
+                SELECT id, workspace_id, original_text, category, effect,
+                       enabled, priority, created_at
+                FROM policy_rules
+                WHERE workspace_id = %s
+                ORDER BY priority ASC, created_at ASC
+                """,
+                (current.workspace_id,),
+            ).fetchall()
+            rules = [PolicyRule.model_validate(policy_row) for policy_row in policy_rows]
+            task = transition(current, rules)
+            task.touch()
+            approval = approval_factory(task)
+            event_type, payload = audit_factory(task, approval)
+            _write_task(conn, task)
+            if approval is not None:
+                _write_approval(conn, approval, approved_by=approved_by)
+            _write_audit_event(
+                conn,
+                workspace_id=task.workspace_id,
+                event_type=event_type,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                task_id=task.id,
+                payload=payload,
+            )
+        return task, approval
+
     def list_for_owner(
         self,
         workspace_id: UUID,
         owner_user_id: UUID,
         *,
+        status: TaskStatus | None = None,
+        require_pending_action: bool = False,
         limit: int = 100,
     ) -> list[Task]:
+        query = """
+            SELECT id, workspace_id, owner_user_id, objective, status,
+                   acceptance_criteria, current_step, blocker, pending_action,
+                   created_at, updated_at
+            FROM tasks
+            WHERE workspace_id = %s AND owner_user_id = %s
+        """
+        params: list[Any] = [workspace_id, owner_user_id]
+        if status is not None:
+            query += " AND status = %s"
+            params.append(status.value)
+        if require_pending_action:
+            query += " AND pending_action IS NOT NULL"
+        query += " ORDER BY updated_at DESC LIMIT %s"
+        params.append(limit)
         with connect(self.dsn, row_factory=dict_row) as conn:
-            rows = conn.execute(
-                """
-                SELECT id, workspace_id, owner_user_id, objective, status,
-                       acceptance_criteria, current_step, blocker, pending_action,
-                       created_at, updated_at
-                FROM tasks
-                WHERE workspace_id = %s AND owner_user_id = %s
-                ORDER BY updated_at DESC
-                LIMIT %s
-                """,
-                (workspace_id, owner_user_id, limit),
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         return [Task.model_validate(row) for row in rows]
 
     def transition_with_memory(
@@ -259,26 +366,7 @@ class PostgresApprovalStore:
     def save(self, approval: Approval, *, approved_by: UUID | None = None) -> Approval:
         with connect(self.dsn) as conn:
             _ensure_workspace(conn, approval.workspace_id)
-            conn.execute(
-                """
-                INSERT INTO approvals (
-                    id, workspace_id, task_id, action_digest, approved,
-                    approved_by, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (task_id, action_digest) DO UPDATE SET
-                    approved = EXCLUDED.approved,
-                    approved_by = EXCLUDED.approved_by
-                """,
-                (
-                    approval.id,
-                    approval.workspace_id,
-                    approval.task_id,
-                    approval.action_digest,
-                    approval.approved,
-                    approved_by,
-                    approval.created_at,
-                ),
-            )
+            _write_approval(conn, approval, approved_by=approved_by)
         return approval
 
 
@@ -298,20 +386,14 @@ class PostgresAuditStore:
     ) -> None:
         with connect(self.dsn) as conn:
             _ensure_workspace(conn, workspace_id)
-            conn.execute(
-                """
-                INSERT INTO audit_events (
-                    workspace_id, task_id, actor_type, actor_id, event_type, payload
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    workspace_id,
-                    task_id,
-                    actor_type,
-                    actor_id,
-                    event_type,
-                    Jsonb(payload or {}),
-                ),
+            _write_audit_event(
+                conn,
+                workspace_id=workspace_id,
+                event_type=event_type,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                task_id=task_id,
+                payload=payload or {},
             )
 
     def list_for_workspace(
@@ -385,6 +467,60 @@ class PostgresMemoryStore:
         assert row is not None
         return dict(row)
 
+    def redeem_invite(
+        self,
+        *,
+        workspace_id: UUID,
+        user_id: UUID,
+        code_hash: str,
+        transition: Callable[
+            [str, dict[str, Any]],
+            tuple[dict[str, Any], dict[str, Any]],
+        ],
+    ) -> dict[str, Any] | None:
+        """Claim one invite and create its member in the same transaction."""
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            row = conn.execute(
+                """
+                SELECT key, value
+                FROM memories
+                WHERE workspace_id = %s
+                  AND user_id = %s
+                  AND namespace = 'access.invite'
+                  AND value ->> 'code_hash' = %s
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (workspace_id, user_id, code_hash),
+            ).fetchone()
+            if row is None:
+                return None
+            invite_key = str(row["key"])
+            invite_value = row["value"]
+            if not isinstance(invite_value, dict):
+                return None
+            updated_invite, member = transition(invite_key, dict(invite_value))
+            member_id = str(member["id"])
+            conn.execute(
+                """
+                UPDATE memories
+                SET value = %s, updated_at = now()
+                WHERE workspace_id = %s
+                  AND user_id = %s
+                  AND namespace = 'access.invite'
+                  AND key = %s
+                """,
+                (Jsonb(updated_invite), workspace_id, user_id, invite_key),
+            )
+            conn.execute(
+                """
+                INSERT INTO memories (workspace_id, user_id, namespace, key, value)
+                VALUES (%s, %s, 'access.member', %s, %s)
+                """,
+                (workspace_id, user_id, member_id, Jsonb(member)),
+            )
+        return member
+
     def list_for_user(
         self,
         *,
@@ -394,6 +530,8 @@ class PostgresMemoryStore:
         key: str | None = None,
         key_prefix: str | None = None,
         exclude_protected: bool = False,
+        exclude_rag_internal: bool = False,
+        exclude_rag_conversation: bool = False,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         if key is not None and key_prefix is not None:
@@ -413,8 +551,19 @@ class PostgresMemoryStore:
                 AND NOT (
                     left(lower(btrim(namespace)), 6) = '_vault'
                     OR left(lower(btrim(namespace)), 12) = 'vault_secure'
+                    OR left(lower(btrim(namespace)), 7) = 'access.'
                 )
             """
+        if exclude_rag_internal:
+            query += """
+                AND NOT (
+                    left(lower(btrim(namespace)), 6) = '_vault'
+                    OR left(lower(btrim(namespace)), 12) = 'vault_secure'
+                    OR left(lower(btrim(namespace)), 7) = 'access.'
+                )
+            """
+        if exclude_rag_conversation:
+            query += " AND left(lower(btrim(namespace)), 12) != 'conversation'"
         if key is not None:
             query += " AND key = %s"
             params.append(key)

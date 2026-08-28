@@ -1,13 +1,17 @@
 import os
+import socket
+import urllib.error
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
-from alter_core import agent_api, conversation_api, productivity_api
+import pytest
+from alter_core import agent_api, conversation_api, productivity_api, rag_api
 from alter_core import api as core_api
 from alter_core.auth import Principal
 from alter_core.models import ActionRequest
 from alter_core.secret_safety import contains_high_confidence_secret
 from api.index import app
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 
@@ -911,6 +915,93 @@ def test_rag_paths_exclude_normalized_runtime_vault_namespaces(monkeypatch):
     principal = Principal(user_id=user_id, workspace_id=workspace_id)
     conversation_hits = conversation_api._rag(principal, "purple elephant")
     assert [item["namespace"] for item in conversation_hits] == ["knowledge"]
+
+
+def test_rag_fallback_limits_newest_rows_not_oldest(monkeypatch):
+    principal = Principal(user_id=uuid4(), workspace_id=uuid4())
+    monkeypatch.setattr(rag_api, "memory_store", None)
+    for index in range(1201):
+        core_api._memory_fallback[
+            (principal.workspace_id, principal.user_id, "knowledge", f"row-{index}")
+        ] = {"text": f"knowledge row {index}"}
+
+    rows = rag_api.knowledge_rows(principal, limit=1200)
+
+    assert len(rows) == 1200
+    assert rows[0]["key"] == "row-1200"
+    assert all(row["key"] != "row-0" for row in rows)
+
+
+def test_knowledge_search_filters_internal_rows_before_limit(monkeypatch):
+    token = configure_owner(monkeypatch)
+    workspace_id = UUID(os.environ["ALTER_OWNER_WORKSPACE_ID"])
+    user_id = UUID(os.environ["ALTER_OWNER_USER_ID"])
+    monkeypatch.setattr(productivity_api, "memory_store", None)
+    core_api._memory_fallback[(workspace_id, user_id, "knowledge", "safe-old-row")] = {
+        "text": "atomic-purple-elephant public documentation"
+    }
+    for index in range(300):
+        core_api._memory_fallback[
+            (workspace_id, user_id, "access.member", f"internal-{index}")
+        ] = {"note": f"atomic-purple-elephant internal member {index}"}
+
+    response = TestClient(app).post(
+        "/api/knowledge/search",
+        headers=auth(token),
+        json={"query": "atomic-purple-elephant", "namespaces": [], "limit": 20},
+    )
+
+    assert response.status_code == 200
+    results = response.json()["results"]
+    assert [item["namespace"] for item in results] == ["knowledge"]
+    assert results[0]["key"] == "safe-old-row"
+
+
+def test_generic_memory_api_cannot_read_or_write_access_records(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(app)
+
+    written = client.put(
+        "/api/memory",
+        headers=auth(token),
+        json={"namespace": "access.invite", "key": "forged", "value": {"role": "owner"}},
+    )
+    listed = client.get(
+        "/api/memory",
+        headers=auth(token),
+        params={"namespace": "access.invite"},
+    )
+
+    assert written.status_code == 403
+    assert listed.status_code == 403
+
+
+def test_research_redirect_to_loopback_is_rejected_before_following(monkeypatch):
+    requests = []
+
+    class RedirectingOpener:
+        def open(self, request, timeout):
+            requests.append((request.full_url, timeout))
+            raise urllib.error.HTTPError(
+                request.full_url,
+                302,
+                "Found",
+                {"Location": "http://127.0.0.1/private"},
+                None,
+            )
+
+    def resolve(host, port, *, type):
+        ip = "93.184.216.34" if host == "public.example" else "127.0.0.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+
+    monkeypatch.setattr(productivity_api, "_RESEARCH_OPENER", RedirectingOpener())
+    monkeypatch.setattr(productivity_api.socket, "getaddrinfo", resolve)
+
+    with pytest.raises(HTTPException) as exc_info:
+        productivity_api._open_public_research_url("https://public.example/article")
+
+    assert exc_info.value.status_code == 403
+    assert requests == [("https://public.example/article", 12)]
 
 
 def test_policy_denied_stale_approval_is_audited(monkeypatch):
