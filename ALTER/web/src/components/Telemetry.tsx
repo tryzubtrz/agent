@@ -3,45 +3,24 @@
 import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 
-const POSTHOG_PROJECT_KEY = "phc_z9CGwpT6bvMMD3BNaqb3XMUfSHvDbqR2kfbNENKgvTrf";
-const POSTHOG_CAPTURE_URL = "https://us.i.posthog.com/capture/";
-const DEVICE_KEY = "alter_telemetry_device";
+type TelemetryValue = string | number | boolean | null;
 
-function deviceId(): string {
-  try {
-    const existing = window.localStorage.getItem(DEVICE_KEY);
-    if (existing) return existing;
-    const value = window.crypto?.randomUUID?.() || `alter-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    window.localStorage.setItem(DEVICE_KEY, value);
-    return value;
-  } catch {
-    return "alter-owner-browser";
-  }
-}
-
-export function captureAlterEvent(event: string, properties: Record<string, string | number | boolean | null> = {}) {
+export function captureAlterEvent(event: "alter_page_view" | "alter_client_error", properties: Record<string, TelemetryValue> = {}) {
   if (typeof window === "undefined") return;
-  const payload = {
-    api_key: POSTHOG_PROJECT_KEY,
-    event,
-    properties: {
-      distinct_id: deviceId(),
-      app: "ALTER",
-      surface: "web",
-      path: window.location.pathname,
-      ...properties,
-    },
-  };
-
-  void fetch(POSTHOG_CAPTURE_URL, {
+  void fetch("/api/core/gateway/posthog/capture", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      event,
+      properties: {
+        route: window.location.pathname,
+        ...properties,
+      },
+    }),
     keepalive: true,
-    mode: "cors",
-    credentials: "omit",
+    credentials: "same-origin",
   }).catch(() => {
-    // Telemetry must never block or break the product.
+    // Observability must never block or break ALTER.
   });
 }
 
