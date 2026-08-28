@@ -9,8 +9,8 @@ type PendingAction = { attempt_id?: string | null; operation: string; target?: s
 type Task = { id: string; objective: string; status: string; current_step?: string | null; blocker?: string | null; acceptance_criteria: string[]; pending_action?: PendingAction | null; created_at: string; updated_at: string };
 type Event = { id: number; event_type: string; created_at: string; payload: Record<string, unknown> };
 type TaskPlan = { plan: string; provider: string; mode: string; boundary: string; side_effects_performed: false; created_at: string };
-type TaskResult = { result_summary: string; verification_evidence: string[]; artifact_refs: string[]; acceptance_criteria_met: true; verification_method: "owner_attestation" };
-type ActionResult = { execution_id?: string; attempt_id: string; action_digest: string; operation: string; target?: string | null; succeeded: boolean; result_summary: string; verification_evidence: string[]; artifact_refs: string[]; verification_method: "owner_attestation" };
+type TaskResult = { result_summary: string; verification_evidence: string[]; artifact_refs: string[]; acceptance_criteria_met: true; verification_method: "owner_attestation" | "tool_executor" };
+type ActionResult = { execution_id?: string; attempt_id: string; action_digest: string; operation: string; target?: string | null; succeeded: boolean; result_summary: string; verification_evidence: string[]; artifact_refs: string[]; verification_method: "owner_attestation" | "tool_executor" };
 type Inspector = {
   task: Task;
   meta: Record<string, unknown>;
@@ -21,11 +21,20 @@ type Inspector = {
   pending_action_digest?: string | null;
   pending_action_attempt_id?: string | null;
 };
+type Session = { authenticated: boolean; role: "owner" | "operator" | "viewer"; capabilities: string[] };
+
+function hasCapability(session: Session | null, required: string): boolean {
+  if (!session) return false;
+  if (session.role === "owner") return true;
+  const caps = new Set(session.capabilities);
+  return caps.has("*") || caps.has(required);
+}
 
 export default function TaskPage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
   const [data, setData] = useState<Inspector | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [expected, setExpected] = useState("");
@@ -43,8 +52,12 @@ export default function TaskPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const result = await core<Inspector>(`/tasks/${id}/inspector`);
+      const [result, sessionResponse] = await Promise.all([
+        core<Inspector>(`/tasks/${id}/inspector`),
+        fetch("/api/auth/session", { cache: "no-store" }),
+      ]);
       setData(result);
+      if (sessionResponse.ok) setSession(await sessionResponse.json() as Session);
       setExpected(String(result.meta.expected_result || ""));
       setDeadline(typeof result.meta.deadline === "string" ? String(result.meta.deadline).slice(0, 16) : "");
       setAutonomy(String(result.meta.autonomy || "balanced"));
@@ -54,7 +67,11 @@ export default function TaskPage() {
   }, [id]);
   useEffect(() => { void refresh(); }, [refresh]);
 
+  const canWrite = hasCapability(session, "tasks.write");
+  const isOwner = session?.role === "owner";
+
   async function control(action: "pause" | "resume" | "retry" | "cancel" | "authentication_complete") {
+    if (!canWrite) return;
     setBusy(true);
     try { await core(`/tasks/${id}/control`, { method: "POST", body: JSON.stringify({ action }) }); await refresh(); }
     catch (err) { setError(err instanceof Error ? err.message : "Дія не виконана"); }
@@ -62,6 +79,7 @@ export default function TaskPage() {
   }
 
   async function saveMeta() {
+    if (!canWrite) return;
     setBusy(true);
     try {
       await core(`/tasks/${id}/meta`, { method: "PUT", body: JSON.stringify({ expected_result: expected || null, deadline: deadline ? new Date(deadline).toISOString() : null, autonomy, sources: [], notes: notes || null }) });
@@ -71,6 +89,7 @@ export default function TaskPage() {
   }
 
   async function createPlan() {
+    if (!canWrite) return;
     setBusy(true);
     try {
       await core("/tasks/" + id + "/plan", {
@@ -82,7 +101,25 @@ export default function TaskPage() {
     finally { setBusy(false); }
   }
 
+  async function executePending() {
+    if (!isOwner || !data?.pending_action_digest) return;
+    setBusy(true);
+    setError("");
+    try {
+      const payload = data.task.status === "awaiting_approval"
+        ? { approval_digest: data.pending_action_digest }
+        : {};
+      await core(`/tasks/${id}/execute-pending`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      await refresh();
+    } catch (err) { setError(err instanceof Error ? err.message : "Executor не зміг виконати активну дію"); }
+    finally { setBusy(false); }
+  }
+
   async function completeTask() {
+    if (!isOwner) return;
     const evidence = splitLines(verificationEvidence);
     const artifacts = splitLines(artifactRefs);
     if (!resultSummary.trim() || evidence.length === 0 || !acceptanceConfirmed) return;
@@ -107,6 +144,7 @@ export default function TaskPage() {
   }
 
   async function attestActionResult() {
+    if (!isOwner) return;
     const evidence = splitLines(actionEvidence);
     if (!data?.pending_action_digest || !data.pending_action_attempt_id || !actionSummary.trim() || evidence.length === 0) return;
     setBusy(true);
@@ -134,6 +172,7 @@ export default function TaskPage() {
   if (!data) return <ModuleShell title="Задача" eyebrow="TASK INSPECTOR"><section style={panel}>{error || "Завантажую…"}</section></ModuleShell>;
   const task = data.task;
   const canPause = ["ready", "executing", "recovering"].includes(task.status);
+  const runtimeExecutable = isRuntimeExecutable(task.pending_action);
 
   return (
     <ModuleShell title="Task Inspector" eyebrow="EXPLAIN · CONTROL · RECOVER">
@@ -143,13 +182,17 @@ export default function TaskPage() {
         {task.blocker && <div style={{ color: "#ffd28b" }}>Причина блокування: {task.blocker}</div>}
         <div style={muted}>Створено {formatDate(task.created_at)} · оновлено {formatDate(task.updated_at)}</div>
         {data.pending_action_digest && <div style={{ ...muted, wordBreak: "break-all" }}>Pending action digest: {data.pending_action_digest}</div>}
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {canPause && <button disabled={busy} onClick={() => void control('pause')} style={primary}>Пауза</button>}
-          {task.status === 'paused' && <button disabled={busy} onClick={() => void control('resume')} style={primary}>Продовжити</button>}
-          {['awaiting_login','awaiting_mfa'].includes(task.status) && <button disabled={busy} onClick={() => void control('authentication_complete')} style={primary}>Я завершив вхід / 2FA</button>}
-          {['failed','blocked_by_rule','recovering'].includes(task.status) && <button disabled={busy} onClick={() => void control('retry')} style={primary}>Повторити</button>}
-          {!['done','cancelled'].includes(task.status) && <button disabled={busy} onClick={() => void control('cancel')} style={danger}>Скасувати</button>}
-        </div>
+        {canWrite ? (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {canPause && <button disabled={busy} onClick={() => void control('pause')} style={primary}>Пауза</button>}
+            {task.status === 'paused' && <button disabled={busy} onClick={() => void control('resume')} style={primary}>Продовжити</button>}
+            {['awaiting_login','awaiting_mfa'].includes(task.status) && <button disabled={busy} onClick={() => void control('authentication_complete')} style={primary}>Я завершив вхід / 2FA</button>}
+            {['failed','blocked_by_rule','recovering'].includes(task.status) && <button disabled={busy} onClick={() => void control('retry')} style={primary}>Повторити</button>}
+            {!['done','cancelled'].includes(task.status) && <button disabled={busy} onClick={() => void control('cancel')} style={danger}>Скасувати</button>}
+          </div>
+        ) : (
+          <div style={muted}>Режим перегляду: керування цією задачею недоступне для твоєї ролі.</div>
+        )}
       </section>
 
       <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12 }}>
@@ -168,7 +211,7 @@ export default function TaskPage() {
         ) : (
           <div style={muted}>Перевіреного плану ще немає.</div>
         )}
-        {["intake", "planning", "recovering"].includes(task.status) && (
+        {canWrite && ["intake", "planning", "recovering"].includes(task.status) && (
           <button disabled={busy} onClick={() => void createPlan()} style={primary}>
             {busy ? "ALTER планує…" : "Створити план через ALTER"}
           </button>
@@ -177,16 +220,39 @@ export default function TaskPage() {
 
       <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12 }}>
         <strong>Очікуваний результат і автономність</strong>
-        <textarea value={expected} onChange={(e) => setExpected(e.target.value)} rows={3} placeholder="Що вважати готовим результатом" style={{ ...field, resize: "vertical" }} />
-        <input type="datetime-local" value={deadline} onChange={(e) => setDeadline(e.target.value)} style={field} />
-        <select value={autonomy} onChange={(e) => setAutonomy(e.target.value)} style={field}><option value="ask_often">Часто питати</option><option value="balanced">Збалансовано</option><option value="high">Висока автономність</option></select>
-        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} placeholder="Нотатки" style={{ ...field, resize: "vertical" }} />
-        <button disabled={busy} onClick={() => void saveMeta()} style={primary}>Зберегти</button>
+        <textarea disabled={!canWrite} value={expected} onChange={(e) => setExpected(e.target.value)} rows={3} placeholder="Що вважати готовим результатом" style={{ ...field, resize: "vertical" }} />
+        <input disabled={!canWrite} type="datetime-local" value={deadline} onChange={(e) => setDeadline(e.target.value)} style={field} />
+        <select disabled={!canWrite} value={autonomy} onChange={(e) => setAutonomy(e.target.value)} style={field}><option value="ask_often">Часто питати</option><option value="balanced">Збалансовано</option><option value="high">Висока автономність</option></select>
+        <textarea disabled={!canWrite} value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} placeholder="Нотатки" style={{ ...field, resize: "vertical" }} />
+        {canWrite && <button disabled={busy} onClick={() => void saveMeta()} style={primary}>Зберегти</button>}
       </section>
 
-      {task.status === "executing" && task.pending_action && data.pending_action_digest && data.pending_action_attempt_id && (
+      {task.pending_action && data.pending_action_digest && ["executing", "awaiting_approval"].includes(task.status) && runtimeExecutable && isOwner && (
+        <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12, borderColor: "rgba(93,224,154,.22)" }}>
+          <strong>Реальне виконання через ALTER Executor</strong>
+          <div style={muted}>
+            {task.pending_action.operation} · {task.pending_action.target || "без цілі"} · ризик {task.pending_action.risk}
+          </div>
+          <div style={muted}>ALTER сам виконає підтримуваний read-only tool, запише результат і verification evidence. Вручну вигадувати підтвердження не потрібно.</div>
+          <button disabled={busy} onClick={() => void executePending()} style={primary}>
+            {busy ? "Executor працює…" : task.status === "awaiting_approval" ? "Схвалити й виконати" : "Виконати через ALTER"}
+          </button>
+        </section>
+      )}
+
+      {task.pending_action && data.pending_action_digest && ["executing", "awaiting_approval"].includes(task.status) && runtimeExecutable && !isOwner && (
+        <section style={{ ...panel, display: "grid", gap: 7, marginTop: 12 }}>
+          <strong>Очікує Owner</strong>
+          <div style={muted}>Цю connector-дію ALTER вміє виконати сам, але production executor навмисно дозволений тільки Owner.</div>
+        </section>
+      )}
+
+      {task.status === "executing" && task.pending_action && data.pending_action_digest && data.pending_action_attempt_id && !runtimeExecutable && isOwner && (
         <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12 }}>
-          <strong>Перевірка активної дії</strong>
+          <strong>Ручне підтвердження зовнішньої дії</strong>
+          <div style={muted}>
+            Ця дія ще не підтримується ALTER Executor. Заповнюй цей блок лише якщо дію реально виконано поза ALTER і ти маєш фактичні докази.
+          </div>
           <div style={muted}>
             {task.pending_action.operation} · {task.pending_action.target || "без цілі"} · ризик {task.pending_action.risk}
           </div>
@@ -198,8 +264,15 @@ export default function TaskPage() {
           <textarea value={actionEvidence} onChange={(event) => setActionEvidence(event.target.value)} rows={3} placeholder={"Докази перевірки — по одному на рядок"} style={{ ...field, resize: "vertical" }} />
           <textarea value={actionArtifacts} onChange={(event) => setActionArtifacts(event.target.value)} rows={2} placeholder="Артефакти — по одному на рядок (необов’язково)" style={{ ...field, resize: "vertical" }} />
           <button disabled={busy || !actionSummary.trim() || splitLines(actionEvidence).length === 0} onClick={() => void attestActionResult()} style={actionSucceeded ? primary : danger}>
-            {actionSucceeded ? "Підтвердити виконання дії" : "Зафіксувати помилку й відновити"}
+            {actionSucceeded ? "Підтвердити фактичний результат" : "Зафіксувати помилку й відновити"}
           </button>
+        </section>
+      )}
+
+      {task.status === "executing" && task.pending_action && !runtimeExecutable && !isOwner && (
+        <section style={{ ...panel, display: "grid", gap: 7, marginTop: 12 }}>
+          <strong>Зовнішня дія потребує Owner</strong>
+          <div style={muted}>ALTER ще не має executor для цієї дії. Лише Owner може зафіксувати фактичний зовнішній результат і докази.</div>
         </section>
       )}
 
@@ -210,6 +283,7 @@ export default function TaskPage() {
             <article key={item.execution_id || `${item.action_digest}:${index}`} style={{ borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 9 }}>
               <div style={{ color: item.succeeded ? "#a9efc4" : "#ffaaa7" }}>{item.operation}: {item.succeeded ? "успішно" : "помилка"}</div>
               <div style={resultText}>{item.result_summary}</div>
+              <div style={muted}>Перевірка: {item.verification_method === "tool_executor" ? "ALTER tool evidence" : "підтвердження Owner"}</div>
               <ul style={list}>{item.verification_evidence.map((evidence) => <li key={evidence}>{evidence}</li>)}</ul>
               {item.artifact_refs.length > 0 && (
                 <div>
@@ -224,8 +298,9 @@ export default function TaskPage() {
 
       {data.result ? (
         <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12 }}>
-          <strong>Результат, підтверджений власником</strong>
+          <strong>Підтверджений результат</strong>
           <div style={resultText}>{data.result.result_summary}</div>
+          <div style={muted}>Метод перевірки: {data.result.verification_method === "tool_executor" ? "ALTER tool evidence" : "підтвердження Owner"}</div>
           <div>
             <div style={muted}>Докази перевірки</div>
             <ul style={list}>{data.result.verification_evidence.map((item) => <li key={item}>{item}</li>)}</ul>
@@ -237,44 +312,25 @@ export default function TaskPage() {
             </div>
           )}
         </section>
-      ) : ["ready", "recovering"].includes(task.status) ? (
+      ) : isOwner && ["ready", "recovering"].includes(task.status) ? (
         <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12 }}>
-          <strong>Підтвердження результату власником</strong>
-          <textarea
-            aria-label="Підсумок результату"
-            value={resultSummary}
-            onChange={(event) => setResultSummary(event.target.value)}
-            rows={3}
-            placeholder="Що фактично створено або виконано"
-            style={{ ...field, resize: "vertical" }}
-          />
-          <textarea
-            aria-label="Докази перевірки"
-            value={verificationEvidence}
-            onChange={(event) => setVerificationEvidence(event.target.value)}
-            rows={3}
-            placeholder={"Докази перевірки — по одному на рядок\nНаприклад: 42 тести пройшли"}
-            style={{ ...field, resize: "vertical" }}
-          />
-          <textarea
-            aria-label="Посилання на артефакти"
-            value={artifactRefs}
-            onChange={(event) => setArtifactRefs(event.target.value)}
-            rows={2}
-            placeholder="Посилання або ID артефактів — по одному на рядок (необов’язково)"
-            style={{ ...field, resize: "vertical" }}
-          />
+          <strong>Підтвердження ручного або зовнішнього результату</strong>
+          <div style={muted}>Використовуй тільки якщо результат реально створено або перевірено поза автоматичним executor-flow.</div>
+          <textarea aria-label="Підсумок результату" value={resultSummary} onChange={(event) => setResultSummary(event.target.value)} rows={3} placeholder="Що фактично створено або виконано" style={{ ...field, resize: "vertical" }} />
+          <textarea aria-label="Докази перевірки" value={verificationEvidence} onChange={(event) => setVerificationEvidence(event.target.value)} rows={3} placeholder={"Докази перевірки — по одному на рядок\nНаприклад: 42 тести пройшли"} style={{ ...field, resize: "vertical" }} />
+          <textarea aria-label="Посилання на артефакти" value={artifactRefs} onChange={(event) => setArtifactRefs(event.target.value)} rows={2} placeholder="Посилання або ID артефактів — по одному на рядок (необов’язково)" style={{ ...field, resize: "vertical" }} />
           <label style={checkLine}>
             <input type="checkbox" checked={acceptanceConfirmed} onChange={(event) => setAcceptanceConfirmed(event.target.checked)} />
-            Я як власник перевірив: критерії готовності виконані
+            Я як Owner перевірив: критерії готовності виконані
           </label>
-          <button
-            disabled={busy || !resultSummary.trim() || splitLines(verificationEvidence).length === 0 || !acceptanceConfirmed}
-            onClick={() => void completeTask()}
-            style={primary}
-          >
+          <button disabled={busy || !resultSummary.trim() || splitLines(verificationEvidence).length === 0 || !acceptanceConfirmed} onClick={() => void completeTask()} style={primary}>
             Підтвердити результат і завершити
           </button>
+        </section>
+      ) : !isOwner && ["ready", "recovering"].includes(task.status) ? (
+        <section style={{ ...panel, display: "grid", gap: 7, marginTop: 12 }}>
+          <strong>Фінальне підтвердження</strong>
+          <div style={muted}>Завершення задачі з owner-attestation доступне тільки Owner. Ти можеш переглянути план, стан і вже записані докази.</div>
         </section>
       ) : null}
 
@@ -288,6 +344,15 @@ export default function TaskPage() {
       </section>
     </ModuleShell>
   );
+}
+
+function isRuntimeExecutable(action?: PendingAction | null): boolean {
+  if (!action) return false;
+  const target = (action.target || "").trim().toLowerCase();
+  return action.category === "connector"
+    && action.operation === "self_test"
+    && action.risk === "read"
+    && ["neon", "botpress", "github", "vercel"].includes(target);
 }
 
 function splitLines(value: string): string[] {

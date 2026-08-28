@@ -42,9 +42,19 @@ export default function ApprovalCenter() {
 
   useEffect(() => {
     if (isOwner !== true) return;
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 15000);
-    return () => window.clearInterval(timer);
+    let disposed = false;
+    let timer: number | undefined;
+
+    async function poll() {
+      await refresh();
+      if (!disposed) timer = window.setTimeout(() => void poll(), 15000);
+    }
+
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [isOwner, refresh]);
 
   async function decide(item: PendingApproval, decision: "approve" | "reject") {
@@ -88,3 +98,4 @@ const card: React.CSSProperties = { border: "1px solid rgba(255,255,255,.1)", bo
 const pre: React.CSSProperties = { margin: "10px 0 0", whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 11, color: "rgba(255,255,255,.55)", background: "rgba(0,0,0,.2)", borderRadius: 12, padding: 10 };
 const iconButtonStyle: React.CSSProperties = { width: 38, height: 38, display: "grid", placeItems: "center", border: "1px solid rgba(255,255,255,.1)", borderRadius: 12, background: "rgba(255,255,255,.04)", color: "#fff" };
 const decisionButtonStyle: React.CSSProperties = { display: "flex", alignItems: "center", justifyContent: "center", gap: 7, minHeight: 42, border: "1px solid rgba(255,255,255,.12)", borderRadius: 13, background: "rgba(255,255,255,.04)", fontWeight: 700 };
+

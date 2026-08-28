@@ -62,7 +62,7 @@ export default function ChatPage() {
     try {
       const [conversation, agent] = await Promise.all([
         core<Conversation>("/conversation"),
-        core<AgentStatus>("/agent/status"),
+        core<AgentStatus>("/conversation/status"),
       ]);
       setMessages(conversation.messages);
       setStatus(agent);
@@ -135,7 +135,7 @@ export default function ChatPage() {
           <p style={muted}>
             {status?.configured
               ? "Розмова зберігається в твоїй приватній памʼяті. Я можу говорити звичайно, а не тільки приймати задачі."
-              : "Дружній AI вже задеплоєний у Botpress, але Core ще чекає один runtime credential. Історія чату вже працює; фальшиву AI-відповідь ALTER не показує."}
+              : "AI runtime ще не підключений до Core. Історія чату працює; фальшиву AI-відповідь ALTER не показує."}
           </p>
         </div>
         <span style={{ ...badge, ...(status?.configured ? good : waiting) }}>{status?.configured ? "ONLINE" : "WAITING"}</span>
