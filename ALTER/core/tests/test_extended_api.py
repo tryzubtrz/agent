@@ -193,8 +193,26 @@ def test_system_status_is_truthful_and_secret_safe(monkeypatch):
     body = response.json()
     assert "components" in body
     assert body["vault"]["raw_secret_exposure"] is False
+    by_key = {item["key"]: item for item in body["components"]}
+    assert by_key["local_models"]["status"] == "waiting"
+    assert by_key["browser"]["status"] == "deferred"
+    assert by_key["android"]["status"] == "deferred"
+    assert "no browser side effects" in by_key["browser"]["detail"].lower()
+    assert "no android side effects" in by_key["android"]["detail"].lower()
     assert "DATABASE_URL" not in str(body)
     assert "ALTER_API_TOKEN" not in str(body)
+
+
+def test_local_model_catalog_never_claims_unverified_runtime(monkeypatch):
+    token = configure_owner(monkeypatch)
+    response = TestClient(app).get("/api/models/catalog", headers=auth(token))
+    assert response.status_code == 200
+    body = response.json()
+    local = [item for item in body["models"] if item["source"] == "local"]
+    assert len(local) == 10
+    assert body["local_runtime_connected"] is False
+    assert all(item["configured"] is False for item in local)
+    assert all(item["install_state"] == "requires_local_runtime" for item in local)
 
 
 def test_connector_gateway_is_owner_only(monkeypatch):

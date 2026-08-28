@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, Bot, CheckCircle2, CircleDashed, Database, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Activity, Bot, CheckCircle2, CircleDashed, Database, PauseCircle, RefreshCw, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 type ComponentStatus = {
   key: string;
   label: string;
-  status: "ready" | "waiting" | "degraded" | string;
+  status: "ready" | "waiting" | "degraded" | "deferred";
   detail: string;
 };
 type SystemStatus = {
@@ -49,6 +49,7 @@ export default function StatusPage() {
 
   const ready = data?.components.filter((item) => item.status === "ready").length ?? 0;
   const waiting = data?.components.filter((item) => item.status === "waiting").length ?? 0;
+  const deferred = data?.components.filter((item) => item.status === "deferred").length ?? 0;
 
   return (
     <main style={shell}>
@@ -69,8 +70,8 @@ export default function StatusPage() {
       <div style={stats}>
         <Stat value={ready} label="ready" />
         <Stat value={waiting} label="waiting" />
+        <Stat value={deferred} label="відкладено" />
         <Stat value={data?.tasks.active ?? "—"} label="активних задач" />
-        <Stat value={data?.tasks.awaiting_approval ?? "—"} label="схвалень" />
       </div>
 
       <section style={{ display: "grid", gap: 9, marginTop: 14 }}>
@@ -98,14 +99,15 @@ function Stat({ value, label }: { value: string | number; label: string }) {
 }
 
 function ComponentRow({ item }: { item: ComponentStatus }) {
-  const Icon = item.status === "ready" ? CheckCircle2 : item.status === "waiting" ? CircleDashed : TriangleAlert;
-  const tone = item.status === "ready" ? "#9af0bd" : item.status === "waiting" ? "#ffd28b" : "#ffaaa7";
+  const Icon = item.status === "ready" ? CheckCircle2 : item.status === "waiting" ? CircleDashed : item.status === "deferred" ? PauseCircle : TriangleAlert;
+  const tone = item.status === "ready" ? "#9af0bd" : item.status === "waiting" ? "#ffd28b" : item.status === "deferred" ? "#aaa4bd" : "#ffaaa7";
+  const label = item.status === "ready" ? "працює" : item.status === "waiting" ? "потрібне налаштування" : item.status === "deferred" ? "відкладено" : "проблема";
   return (
     <article style={panel}>
       <div style={{ display: "grid", gridTemplateColumns: "40px 1fr auto", gap: 10, alignItems: "center" }}>
         <div style={{ ...componentIcon, color: tone }}><Icon size={19} /></div>
         <div><strong>{item.label}</strong><div style={muted}>{item.detail}</div></div>
-        <span style={{ color: tone, fontSize: 10, textTransform: "uppercase" }}>{item.status}</span>
+        <span style={{ color: tone, fontSize: 9, textTransform: "uppercase", textAlign: "right", maxWidth: 95 }}>{label}</span>
       </div>
     </article>
   );

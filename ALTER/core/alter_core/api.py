@@ -35,7 +35,7 @@ from .persistence import (
 from .policy_store import InMemoryPolicyStore
 from .secret_safety import contains_high_confidence_secret
 
-app = FastAPI(title="ALTER Core", version="0.6.0")
+app = FastAPI(title="ALTER Core", version="0.6.1")
 
 _database_url = os.getenv("DATABASE_URL")
 if _database_url:
@@ -367,7 +367,7 @@ def health() -> dict[str, str]:
     return {
         "service": "alter-core",
         "status": "ok",
-        "version": "0.6.0",
+        "version": "0.6.1",
         "storage": STORAGE_MODE,
     }
 
