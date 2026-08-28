@@ -84,6 +84,26 @@ def test_operator_can_create_task_but_cannot_open_owner_only_access_admin(monkey
     assert members.status_code == 403
 
 
+def test_conversation_capability_can_read_chat_status_without_task_write(monkeypatch):
+    user_id, workspace_id, _owner_token = configure_owner(monkeypatch)
+    token, _ttl = issue_member_token(
+        member_id="conversation-only-member",
+        user_id=user_id,
+        workspace_id=workspace_id,
+        role="operator",
+        capabilities=["conversation"],
+    )
+    client = TestClient(app)
+
+    status = client.get("/api/conversation/status", headers=bearer(token))
+    assert status.status_code == 200
+    assert status.json()["provider"] == "botpress"
+
+    task = client.post("/api/tasks", headers=bearer(token), json={"objective": "must stay denied"})
+    assert task.status_code == 403
+    assert "tasks.write" in task.json()["detail"]
+
+
 def test_member_token_tampering_is_rejected(monkeypatch):
     user_id, workspace_id, _owner_token = configure_owner(monkeypatch)
     token, _ttl = issue_member_token(
