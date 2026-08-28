@@ -1,5 +1,7 @@
 import os
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -7,12 +9,16 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from alter_core import api as core_api
+from alter_core import access_api, api as core_api
 from alter_core import botpress_gateway, conversation_api
+from alter_core.access_api import RedeemBody
+from alter_core.auth import Principal
 from alter_core.botpress_gateway import BotpressGateway
 from api.index import app
 from app.main import app as vercel_app
+from fastapi import HTTPException
 from scripts.fetch_sealing_key import NoRedirectHandler, fetch_public_key
+from scripts.apply_migrations import apply_migration
 
 
 def configure_owner(monkeypatch):
@@ -90,6 +96,88 @@ def test_invite_code_is_one_time_and_not_returned_by_list(monkeypatch):
     assert first.json()["role"] == "viewer"
     second = client.post("/api/access/redeem", headers=auth(token), json={"code": code})
     assert second.status_code == 409
+
+
+def test_fallback_invitation_redemption_is_atomic_under_concurrency(monkeypatch):
+    principal = Principal(user_id=uuid4(), workspace_id=uuid4())
+    code = "alt_" + "concurrent-invite-code-x" * 2
+    invite_id = str(uuid4())
+    now = datetime.now(timezone.utc)
+    invite = {
+        "id": invite_id,
+        "label": "Concurrent Viewer",
+        "role": "viewer",
+        "capabilities": ["tasks.read"],
+        "code_hash": access_api._hash(code),
+        "created_at": now.isoformat(),
+        "expires_at": (now + timedelta(hours=1)).isoformat(),
+        "redeemed_at": None,
+        "revoked": False,
+        "deleted": False,
+    }
+    monkeypatch.setattr(access_api, "memory_store", None)
+    core_api._memory_fallback[
+        (principal.workspace_id, principal.user_id, "access.invite", invite_id)
+    ] = invite
+
+    def redeem_once():
+        try:
+            return access_api.redeem_invite(RedeemBody(code=code), principal)
+        except HTTPException as exc:
+            return exc.status_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _index: redeem_once(), range(2)))
+
+    successes = [outcome for outcome in outcomes if isinstance(outcome, dict)]
+    failures = [outcome for outcome in outcomes if isinstance(outcome, int)]
+    members = [
+        value
+        for (workspace_id, user_id, namespace, _key), value in core_api._memory_fallback.items()
+        if workspace_id == principal.workspace_id
+        and user_id == principal.user_id
+        and namespace == "access.member"
+    ]
+    assert len(successes) == 1
+    assert failures == [409]
+    assert len(members) == 1
+
+
+def test_memory_index_migration_is_nonblocking_and_autocommit_documented():
+    repository_root = Path(__file__).resolve().parents[3]
+    migration = (
+        repository_root / "ALTER/core/migrations/0001_memory_lookup_indexes.sql"
+    ).read_text(encoding="utf-8")
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS" in migration
+    assert "autocommit" in migration.lower()
+
+
+def test_migration_runner_uses_autocommit(monkeypatch, tmp_path):
+    migration = tmp_path / "0001_test.sql"
+    migration.write_text("SELECT 1;\n", encoding="utf-8")
+    calls = []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql):
+            calls.append(("execute", sql))
+
+    def fake_connect(dsn, *, autocommit):
+        calls.append(("connect", dsn, autocommit))
+        return Connection()
+
+    monkeypatch.setattr("scripts.apply_migrations.connect", fake_connect)
+    apply_migration("postgresql://unused", migration)
+
+    assert calls == [
+        ("connect", "postgresql://unused", True),
+        ("execute", "SELECT 1;"),
+    ]
 
 
 def test_media_generation_requires_explicit_cost_confirmation(monkeypatch):

@@ -11,9 +11,10 @@ from pydantic import BaseModel, Field, field_validator
 
 from .auth import Principal, require_owner
 from .memory_safety import (
+    is_internal_memory_namespace as _is_internal_memory_namespace,
     is_protected_memory_namespace as _is_protected_memory_namespace,
 )
-from .models import ActionRequest, PolicyEffect, PolicyRule, Task, TaskStatus
+from .models import Approval, ActionRequest, PolicyEffect, PolicyRule, Task, TaskStatus
 from .orchestrator import (
     ApprovalMismatchError,
     InMemoryTaskStore,
@@ -132,6 +133,113 @@ def _commit_task_transition_with_record(
     updated = store.transition(task_id, transition)
     persist_record()
     return updated
+
+
+def _commit_approval_decision(
+    *,
+    task_id: UUID,
+    principal: Principal,
+    action_digest: str,
+    approved: bool,
+    source: str,
+) -> tuple[Task, Approval]:
+    """Commit the task decision with its approval row and audit evidence."""
+
+    def transition(candidate: Task, current_rules: list[PolicyRule]) -> Task:
+        if approved:
+            return orchestrator.transition_pending_approval(
+                candidate,
+                workspace_id=principal.workspace_id,
+                action_digest=action_digest,
+                owner_rules=current_rules,
+                owner_user_id=principal.user_id,
+            )
+        return orchestrator.transition_pending_rejection(
+            candidate,
+            workspace_id=principal.workspace_id,
+            owner_user_id=principal.user_id,
+            action_digest=action_digest,
+        )
+
+    def approval_factory(updated: Task) -> Approval | None:
+        if (
+            approved
+            and updated.status == TaskStatus.BLOCKED_BY_RULE
+            and updated.current_step == "policy_recheck_before_approved_action"
+        ):
+            return None
+        return Approval(
+            workspace_id=principal.workspace_id,
+            task_id=updated.id,
+            action_digest=action_digest,
+            approved=approved,
+        )
+
+    def audit_factory(
+        updated: Task,
+        approval: Approval | None,
+    ) -> tuple[str, dict[str, Any]]:
+        if approval is None:
+            return (
+                "action.approval_blocked_by_policy",
+                {
+                    "action_digest": action_digest,
+                    "reason": updated.blocker,
+                    "source": source,
+                },
+            )
+        return (
+            "action.approved" if approval.approved else "action.rejected",
+            {"action_digest": action_digest, "source": source},
+        )
+
+    store = orchestrator.store
+    if isinstance(store, PostgresTaskStore):
+        updated, approval = store.transition_with_decision(
+            task_id=task_id,
+            user_id=principal.user_id,
+            transition=transition,
+            approval_factory=approval_factory,
+            approved_by=principal.user_id,
+            actor_type=principal.actor_role,
+            actor_id=principal.actor_id,
+            audit_factory=audit_factory,
+        )
+    else:
+        current_rules = policy_store.list_for_workspace(principal.workspace_id)
+        outcome: dict[str, Any] = {}
+
+        def apply(candidate: Task) -> Task:
+            updated_task = transition(candidate, current_rules)
+            outcome["task"] = updated_task
+            outcome["approval"] = approval_factory(updated_task)
+            return updated_task
+
+        def persist_decision() -> None:
+            updated_task = outcome["task"]
+            approval_record = outcome["approval"]
+            if approval_record is not None and approval_store is not None:
+                approval_store.save(approval_record, approved_by=principal.user_id)
+            event_type, payload = audit_factory(updated_task, approval_record)
+            _audit(
+                principal,
+                event_type=event_type,
+                task_id=updated_task.id,
+                payload=payload,
+            )
+
+        if isinstance(store, InMemoryTaskStore):
+            updated = store.transition_with_effect(task_id, apply, persist_decision)
+        else:
+            updated = store.transition(task_id, apply)
+            persist_decision()
+        approval = outcome["approval"]
+
+    if approval is None:
+        raise PolicyDeniedApprovalError(
+            "Current policy denies the pending action; the stale approval was not applied."
+        )
+    return updated, approval
 
 
 def _clean_bounded_text_items(values: list[str], *, field_name: str, max_length: int) -> list[str]:
@@ -519,8 +627,8 @@ def list_memory(
     limit: int = Query(default=100, ge=1, le=250),
     principal: Principal = Depends(require_owner),
 ) -> list[dict[str, Any]]:
-    if namespace is not None and _is_protected_memory_namespace(namespace):
-        raise HTTPException(status_code=403, detail="Vault storage is accessible only through ALTER Vault APIs.")
+    if namespace is not None and _is_internal_memory_namespace(namespace):
+        raise HTTPException(status_code=403, detail="Internal memory is accessible only through its dedicated ALTER API.")
     if memory_store is not None:
         rows = memory_store.list_for_user(
             workspace_id=principal.workspace_id,
@@ -529,7 +637,7 @@ def list_memory(
             exclude_protected=True,
             limit=limit,
         )
-        return [row for row in rows if not _is_protected_memory_namespace(str(row.get("namespace", "")))]
+        return [row for row in rows if not _is_internal_memory_namespace(str(row.get("namespace", "")))]
 
     items: list[dict[str, Any]] = []
     for (workspace_id, user_id, item_namespace, key), value in _memory_fallback.items():
@@ -537,7 +645,7 @@ def list_memory(
             continue
         if namespace is not None and item_namespace != namespace:
             continue
-        if _is_protected_memory_namespace(item_namespace):
+        if _is_internal_memory_namespace(item_namespace):
             continue
         items.append({"namespace": item_namespace, "key": key, "value": value})
     return list(reversed(items))[:limit]
@@ -549,10 +657,10 @@ def upsert_memory(
     body: MemoryUpsertBody,
     principal: Principal = Depends(require_owner),
 ) -> dict[str, Any]:
-    if _is_protected_memory_namespace(body.namespace):
+    if _is_internal_memory_namespace(body.namespace):
         raise HTTPException(
             status_code=403,
-            detail="Vault storage is accessible only through ALTER Vault APIs.",
+            detail="Internal memory is accessible only through its dedicated ALTER API.",
         )
     if contains_high_confidence_secret(body.value):
         raise HTTPException(
@@ -693,20 +801,12 @@ def approve_action(
 ) -> Task:
     _get_owned_task(task_id, principal)
     try:
-        task, approval = orchestrator.approve_pending_action(
+        task, _approval = _commit_approval_decision(
             task_id=task_id,
-            workspace_id=principal.workspace_id,
+            principal=principal,
             action_digest=body.action_digest,
-            owner_rules=policy_store.list_for_workspace(principal.workspace_id),
-            owner_user_id=principal.user_id,
-        )
-        if approval_store is not None:
-            approval_store.save(approval, approved_by=principal.user_id)
-        _audit(
-            principal,
-            event_type="action.approved",
-            task_id=task.id,
-            payload={"action_digest": approval.action_digest},
+            approved=True,
+            source="legacy_task_endpoint",
         )
         return task
     except TaskNotFoundError as exc:
@@ -714,13 +814,6 @@ def approve_action(
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail="Workspace mismatch") from exc
     except PolicyDeniedApprovalError as exc:
-        blocked = orchestrator.store.get(task_id)
-        _audit(
-            principal,
-            event_type="action.approval_blocked_by_policy",
-            task_id=blocked.id,
-            payload={"action_digest": body.action_digest, "reason": blocked.blocker},
-        )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ApprovalMismatchError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

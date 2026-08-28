@@ -5,6 +5,7 @@ from alter_core import persistence
 from alter_core.models import (
     ActionRequest,
     ActionRisk,
+    Approval,
     PolicyEffect,
     PolicyRule,
     TaskStatus,
@@ -432,6 +433,188 @@ def test_postgres_memory_excludes_vault_rows_before_limit(monkeypatch):
     limit = query.index("LIMIT %s")
     assert protected_filter < order_by < limit
     assert "left(lower(btrim(namespace)), 12) = 'vault_secure'" in query
+    assert "left(lower(btrim(namespace)), 7) = 'access.'" in query
+
+
+def test_postgres_pending_approval_predicates_precede_limit(monkeypatch):
+    queries: list[tuple[str, list]] = []
+
+    class Result:
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, params):
+            queries.append((" ".join(query.split()), list(params)))
+            return Result()
+
+    monkeypatch.setattr(persistence, "connect", lambda *_args, **_kwargs: Connection())
+    PostgresTaskStore("postgresql://unused").list_for_owner(
+        workspace_id=uuid4(),
+        owner_user_id=uuid4(),
+        status=TaskStatus.AWAITING_APPROVAL,
+        require_pending_action=True,
+        limit=100,
+    )
+
+    query, params = queries[0]
+    assert query.index("status = %s") < query.index("ORDER BY updated_at DESC")
+    assert query.index("pending_action IS NOT NULL") < query.index("LIMIT %s")
+    assert params[-2:] == [TaskStatus.AWAITING_APPROVAL.value, 100]
+
+
+def test_postgres_approval_decision_is_one_transaction(monkeypatch):
+    orchestrator = TaskOrchestrator()
+    workspace_id = uuid4()
+    owner_user_id = uuid4()
+    task = orchestrator.create_task(
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        objective="Approve atomically",
+    )
+    orchestrator.mark_ready(task.id)
+    waiting = orchestrator.request_action(
+        make_action(
+            workspace_id=workspace_id,
+            task_id=task.id,
+            category="social_publish",
+            risk=ActionRisk.PUBLIC,
+            operation="publish_post",
+        )
+    )
+    assert waiting.pending_action is not None
+    digest = waiting.pending_action.digest()
+    queries: list[str] = []
+    connections: list[object] = []
+
+    class Result:
+        def __init__(self, *, one=None, many=None):
+            self.one = one
+            self.many = many or []
+
+        def fetchone(self):
+            return self.one
+
+        def fetchall(self):
+            return self.many
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, _params):
+            normalized = " ".join(query.split())
+            queries.append(normalized)
+            if "FROM tasks" in normalized and "FOR UPDATE" in normalized:
+                return Result(one=waiting.model_dump(mode="python"))
+            if "FROM policy_rules" in normalized:
+                return Result(many=[])
+            return Result()
+
+    def connect_once(*_args, **_kwargs):
+        connection = Connection()
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(persistence, "connect", connect_once)
+    updated, approval = PostgresTaskStore("postgresql://unused").transition_with_decision(
+        task_id=task.id,
+        user_id=owner_user_id,
+        transition=lambda candidate, rules: orchestrator.transition_pending_approval(
+            candidate,
+            workspace_id=workspace_id,
+            action_digest=digest,
+            owner_rules=rules,
+            owner_user_id=owner_user_id,
+        ),
+        approval_factory=lambda candidate: Approval(
+            workspace_id=workspace_id,
+            task_id=candidate.id,
+            action_digest=digest,
+            approved=True,
+        ),
+        approved_by=owner_user_id,
+        actor_type="owner",
+        actor_id="owner",
+        audit_factory=lambda _task, _approval: (
+            "action.approved",
+            {"action_digest": digest},
+        ),
+    )
+
+    assert len(connections) == 1
+    assert updated.status == TaskStatus.EXECUTING
+    assert approval is not None and approval.approved is True
+    assert next(i for i, query in enumerate(queries) if "UPDATE tasks" in query) < next(
+        i for i, query in enumerate(queries) if "INSERT INTO approvals" in query
+    ) < next(i for i, query in enumerate(queries) if "INSERT INTO audit_events" in query)
+
+
+def test_postgres_invite_redemption_locks_and_writes_atomically(monkeypatch):
+    workspace_id = uuid4()
+    owner_user_id = uuid4()
+    invite_id = str(uuid4())
+    member_id = str(uuid4())
+    queries: list[str] = []
+    connections: list[object] = []
+    invite = {
+        "id": invite_id,
+        "code_hash": "digest",
+        "redeemed_at": None,
+    }
+
+    class Result:
+        def __init__(self, one=None):
+            self.one = one
+
+        def fetchone(self):
+            return self.one
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, _params):
+            normalized = " ".join(query.split())
+            queries.append(normalized)
+            if "FROM memories" in normalized and "FOR UPDATE" in normalized:
+                return Result({"key": invite_id, "value": invite})
+            return Result()
+
+    def connect_once(*_args, **_kwargs):
+        connection = Connection()
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(persistence, "connect", connect_once)
+    member = PostgresMemoryStore("postgresql://unused").redeem_invite(
+        workspace_id=workspace_id,
+        user_id=owner_user_id,
+        code_hash="digest",
+        transition=lambda key, value: (
+            {**value, "redeemed_at": "now"},
+            {"id": member_id, "invite_id": key},
+        ),
+    )
+
+    assert member == {"id": member_id, "invite_id": invite_id}
+    assert len(connections) == 1
+    lock_index = next(i for i, query in enumerate(queries) if "FOR UPDATE" in query)
+    update_index = next(i for i, query in enumerate(queries) if "UPDATE memories" in query)
+    member_index = next(i for i, query in enumerate(queries) if "INSERT INTO memories" in query)
+    assert lock_index < update_index < member_index
 
 
 def test_approval_rechecks_current_policy_and_rejects_stale_authority():

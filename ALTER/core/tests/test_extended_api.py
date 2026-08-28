@@ -212,6 +212,6 @@ def test_connector_gateway_reports_real_boundaries(monkeypatch):
     assert response.status_code == 200
     by_key = {item["key"]: item for item in response.json()}
     assert by_key["posthog"]["status"] == "connected"
-    assert by_key["github"]["status"] == "not_configured"
-    assert by_key["vercel"]["status"] == "not_configured"
+    assert by_key["github"]["status"] == "credential_required"
+    assert by_key["vercel"]["status"] == "credential_required"
     assert by_key["botpress"]["write_boundary"] == "alterThink-only-no-side-effects"
