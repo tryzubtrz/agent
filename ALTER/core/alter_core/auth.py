@@ -59,8 +59,6 @@ def system_principal(actor_id: str) -> Principal:
 
 
 def _member_signing_key() -> bytes:
-    # Prefer a dedicated member-token secret, while keeping existing deployments
-    # operable by falling back to the high-entropy owner API token.
     raw = os.getenv("ALTER_MEMBER_TOKEN_SECRET") or os.getenv("ALTER_API_TOKEN")
     if not raw:
         raise HTTPException(
@@ -87,7 +85,10 @@ def issue_member_token(
     role: Literal["operator", "viewer"],
     capabilities: list[str],
 ) -> tuple[str, int]:
-    ttl = int(os.getenv("ALTER_MEMBER_TOKEN_TTL_SECONDS", "43200"))
+    try:
+        ttl = int(os.getenv("ALTER_MEMBER_TOKEN_TTL_SECONDS", "43200"))
+    except ValueError:
+        ttl = 43200
     ttl = min(max(ttl, 300), 86400)
     now = int(time.time())
     payload = {
@@ -293,8 +294,6 @@ def require_owner(
         )
 
     if secrets.compare_digest(supplied_token, expected_token):
-        # Owner token always remains owner authority. Actor headers may annotate audit
-        # identity, but can no longer downgrade/forge the authorization role.
         clean_actor = actor_id.strip()[:160] if isinstance(actor_id, str) and actor_id.strip() else "owner"
         return Principal(
             user_id=user_id,
@@ -312,8 +311,6 @@ def require_owner(
         )
 
     principal = _parse_member_token(supplied_token)
-    # A signed member token is bound to the configured owner/workspace and cannot
-    # be replayed into another ALTER deployment.
     if principal.user_id != user_id or principal.workspace_id != workspace_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
