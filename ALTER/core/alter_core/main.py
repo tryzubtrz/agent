@@ -12,6 +12,7 @@ from .automation_tick_api import router as automation_tick_router
 from .connector_gateway_api import router as connector_gateway_router
 from .conversation_api import router as conversation_router
 from .document_api import router as document_router
+from .executor_api import router as executor_router
 from .market_api import router as market_router
 from .media_api import router as media_router
 from .member_auth_api import router as member_auth_router
@@ -33,6 +34,7 @@ for router in (
     connector_gateway_router,
     conversation_router,
     document_router,
+    executor_router,
     market_router,
     media_router,
     memory_v2_router,
