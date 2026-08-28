@@ -294,11 +294,17 @@ def require_owner(
         )
 
     if secrets.compare_digest(supplied_token, expected_token):
+        # Backward-compatible downgrade for trusted callers that already possess
+        # the owner credential. It cannot grant more authority than the bearer has.
+        # Real delegated members authenticate only with signed altm.* tokens.
+        owner_role: ActorRole = (
+            actor_role if isinstance(actor_role, str) and actor_role in {"operator", "viewer"} else "owner"
+        )
         clean_actor = actor_id.strip()[:160] if isinstance(actor_id, str) and actor_id.strip() else "owner"
         return Principal(
             user_id=user_id,
             workspace_id=workspace_id,
-            actor_role="owner",
+            actor_role=owner_role,
             actor_id=clean_actor,
             capabilities=("*",),
         )
