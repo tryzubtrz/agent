@@ -9,7 +9,11 @@ from pydantic import BaseModel, Field
 
 from .api import _audit, _commit_task_transition_with_record, _get_owned_task, orchestrator
 from .auth import Principal, require_owner
-from .botpress_contract import BotpressContractError, validate_specialist_output
+from .botpress_contract import (
+    BotpressContractError,
+    BotpressInternalLeakError,
+    validate_specialist_output,
+)
 from .botpress_gateway import (
     BotpressGateway,
     BotpressRuntimeError,
@@ -32,6 +36,30 @@ class ThinkBody(BaseModel):
 class PlanTaskBody(BaseModel):
     context: str = Field(default="", max_length=20_000)
     mode: Literal["normal", "deep", "plan"] = "plan"
+
+
+def _repair_internal_chat_output(*, objective: str, draft: str) -> tuple[str, bool]:
+    """Retry once when Botpress accidentally returns internal orchestration notes.
+
+    The rejected draft is secret-redacted and size-bounded before it is sent back
+    to the specialist. The repaired response must pass the same strict contract.
+    """
+    safe_draft, draft_redacted = redact_secrets(draft[:8_000])
+    repair_objective = (
+        "Answer the user's original message directly and naturally. "
+        "The previous draft was rejected because it exposed internal ALTER reasoning. "
+        "Return only the final user-facing answer. Do not mention Core, orchestration, "
+        "preflight, hidden reasoning, tools not being invoked, redacted context, or the repair.\n\n"
+        f"ORIGINAL USER MESSAGE:\n{objective}"
+    )
+    repair_context = f"REJECTED DRAFT (rewrite, do not describe):\n{safe_draft}"
+    repaired_output = gateway.think(
+        objective=repair_objective,
+        context=repair_context,
+        mode="quick",
+    )
+    repaired = validate_specialist_output(repaired_output)
+    return repaired, draft_redacted
 
 
 @router.get("/agent/status")
@@ -67,13 +95,36 @@ def agent_think(
     except BotpressRuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    recovered_internal_leak = False
+    repair_redacted = False
     try:
         response = validate_specialist_output(output)
+    except BotpressInternalLeakError:
+        recovered_internal_leak = True
+        raw_draft = output.get("response")
+        draft = raw_draft if isinstance(raw_draft, str) else ""
+        try:
+            response, repair_redacted = _repair_internal_chat_output(
+                objective=safe_objective,
+                draft=draft,
+            )
+        except BotpressUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except (BotpressRuntimeError, BotpressContractError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="ALTER blocked an internal reasoning leak and could not safely repair the response.",
+            ) from exc
     except BotpressContractError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     safe_response, response_redacted = redact_secrets(response)
-    redacted = objective_redacted or context_redacted or response_redacted
+    redacted = (
+        objective_redacted
+        or context_redacted
+        or repair_redacted
+        or response_redacted
+    )
     _audit(
         principal,
         event_type="agent.thought",
@@ -81,6 +132,7 @@ def agent_think(
             "provider": "botpress",
             "mode": body.mode,
             "redacted": redacted,
+            "recovered_internal_leak": recovered_internal_leak,
             "boundary": "core-policy-required",
         },
     )
@@ -91,6 +143,7 @@ def agent_think(
         "side_effects_performed": False,
         "boundary": "core-policy-required",
         "redacted": redacted,
+        "recovered_internal_leak": recovered_internal_leak,
     }
 
 
