@@ -155,6 +155,20 @@ def _rag_context(items: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
+@router.get("/conversation/status")
+@router.get("/api/conversation/status")
+def conversation_status(_principal: Principal = Depends(require_owner)) -> dict[str, object]:
+    status = gateway.status()
+    return {
+        "provider": "botpress",
+        "configured": status.configured,
+        "bot_id_configured": status.bot_id_configured,
+        "credential_configured": status.credential_configured,
+        "action": status.action,
+        "side_effect_boundary": REQUIRED_SPECIALIST_BOUNDARY,
+    }
+
+
 @router.get("/conversation")
 @router.get("/api/conversation")
 def get_conversation(limit: int = Query(default=60, ge=1, le=_MAX_MESSAGES), principal: Principal = Depends(require_owner)) -> dict[str, Any]:
