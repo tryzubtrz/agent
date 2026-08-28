@@ -10,7 +10,11 @@ from pydantic import BaseModel, Field
 
 from .api import _audit, _memory_fallback, memory_store
 from .auth import Principal, require_owner
-from .botpress_contract import REQUIRED_SPECIALIST_BOUNDARY, BotpressContractError
+from .botpress_contract import (
+    REQUIRED_SPECIALIST_BOUNDARY,
+    BotpressContractError,
+    BotpressInternalLeakError,
+)
 from .botpress_gateway import (
     BotpressGateway,
     BotpressRuntimeError,
@@ -186,11 +190,15 @@ def respond_in_conversation(body: ChatBody, principal: Principal = Depends(requi
         )
     except BotpressUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (BotpressRuntimeError, BotpressContractError) as exc:
+    except BotpressRuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except BotpressInternalLeakError as exc:
         raise HTTPException(
             status_code=502,
             detail="ALTER could not produce a safe user-facing response.",
         ) from exc
+    except BotpressContractError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     owner_message = {"role": "user", "text": safe_owner_text, "created_at": datetime.now(timezone.utc).isoformat(), "redacted": owner_redacted}
     safe_response, response_redacted = _redact(generated.text)
