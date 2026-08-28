@@ -1,0 +1,74 @@
+name: Export ALTER Source
+
+on:
+  push:
+    branches:
+      - export/alter-source-20260828
+    paths:
+      - .github/workflows/export-alter-source.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Build sanitized source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p export/ALTER export/.github/workflows
+
+          rsync -a ALTER/ export/ALTER/ \
+            --exclude '.env' \
+            --exclude '.env.*' \
+            --exclude 'bootstrap_vault.json' \
+            --exclude '.next' \
+            --exclude 'node_modules' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude '.vercel' \
+            --exclude 'dist' \
+            --exclude 'build' \
+            --exclude '.DS_Store'
+
+          find .github/workflows -maxdepth 1 -type f -name 'alter-*.yml' -exec cp {} export/.github/workflows/ \;
+
+          cat > export/README_FOR_EXTERNAL_AI.md <<'EOF'
+          # ALTER source package — external review copy
+
+          This archive is a sanitized snapshot of the current ALTER source code.
+
+          Review goals:
+          - audit architecture, correctness, UI/UX, security boundaries, auth/RBAC, Vault usage, memory/RAG, model routing, Botpress integration, scheduler/automations, observability, connector behavior, tests and production readiness;
+          - identify concrete bugs, incomplete features, dead UI/actions, inconsistent states and unsafe assumptions;
+          - make fixes only in a separate copy/branch and provide a clear change summary and patch/diff;
+          - do not invent or request production secrets;
+          - do not weaken authentication, approval, audit or Vault boundaries;
+          - do not claim something works unless verified by tests or runtime evidence.
+
+          Sanitization:
+          - .env files are excluded;
+          - Vault bootstrap payload is excluded;
+          - caches, dependencies and build outputs are excluded;
+          - no production credentials are intentionally included.
+          EOF
+
+          printf 'source_commit=%s\n' "$GITHUB_SHA" > export/SOURCE_VERSION.txt
+          printf 'source_branch=%s\n' "$GITHUB_REF_NAME" >> export/SOURCE_VERSION.txt
+
+          cd export
+          zip -qr ../ALTER-source-sanitized.zip .
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALTER-source-sanitized
+          path: ALTER-source-sanitized.zip
+          if-no-files-found: error
+          retention-days: 7
