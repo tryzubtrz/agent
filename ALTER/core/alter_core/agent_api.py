@@ -44,7 +44,8 @@ def _repair_internal_chat_output(*, objective: str, draft: str) -> tuple[str, bo
     The rejected draft is secret-redacted and size-bounded before it is sent back
     to the specialist. The repaired response must pass the same strict contract.
     """
-    safe_draft, draft_redacted = redact_secrets(draft[:8_000])
+    safe_draft, draft_redacted = redact_secrets(draft)
+    safe_draft = safe_draft[:8_000]
     repair_objective = (
         "Answer the user's original message directly and naturally. "
         "The previous draft was rejected because it exposed internal ALTER reasoning. "
