@@ -5,12 +5,12 @@ import { useCallback, useEffect, useState } from "react";
 import ModuleShell, { danger, field, muted, panel, primary } from "@/components/ModuleShell";
 import { core, formatDate } from "@/lib/core-client";
 
-type PendingAction = { operation: string; target?: string | null; category: string; risk: string };
+type PendingAction = { attempt_id?: string | null; operation: string; target?: string | null; category: string; risk: string };
 type Task = { id: string; objective: string; status: string; current_step?: string | null; blocker?: string | null; acceptance_criteria: string[]; pending_action?: PendingAction | null; created_at: string; updated_at: string };
 type Event = { id: number; event_type: string; created_at: string; payload: Record<string, unknown> };
 type TaskPlan = { plan: string; provider: string; mode: string; boundary: string; side_effects_performed: false; created_at: string };
 type TaskResult = { result_summary: string; verification_evidence: string[]; artifact_refs: string[]; acceptance_criteria_met: true; verification_method: "owner_attestation" };
-type ActionResult = { execution_id?: string; action_digest: string; operation: string; target?: string | null; succeeded: boolean; result_summary: string; verification_evidence: string[]; artifact_refs: string[]; verification_method: "owner_attestation" };
+type ActionResult = { execution_id?: string; attempt_id: string; action_digest: string; operation: string; target?: string | null; succeeded: boolean; result_summary: string; verification_evidence: string[]; artifact_refs: string[]; verification_method: "owner_attestation" };
 type Inspector = {
   task: Task;
   meta: Record<string, unknown>;
@@ -19,6 +19,7 @@ type Inspector = {
   action_results: ActionResult[];
   events: Event[];
   pending_action_digest?: string | null;
+  pending_action_attempt_id?: string | null;
 };
 
 export default function TaskPage() {
@@ -107,13 +108,14 @@ export default function TaskPage() {
 
   async function attestActionResult() {
     const evidence = splitLines(actionEvidence);
-    if (!data?.pending_action_digest || !actionSummary.trim() || evidence.length === 0) return;
+    if (!data?.pending_action_digest || !data.pending_action_attempt_id || !actionSummary.trim() || evidence.length === 0) return;
     setBusy(true);
     try {
       await core("/tasks/" + id + "/action-result", {
         method: "POST",
         body: JSON.stringify({
           action_digest: data.pending_action_digest,
+          attempt_id: data.pending_action_attempt_id,
           succeeded: actionSucceeded,
           result_summary: actionSummary.trim(),
           verification_evidence: evidence,
@@ -182,7 +184,7 @@ export default function TaskPage() {
         <button disabled={busy} onClick={() => void saveMeta()} style={primary}>Зберегти</button>
       </section>
 
-      {task.status === "executing" && task.pending_action && data.pending_action_digest && (
+      {task.status === "executing" && task.pending_action && data.pending_action_digest && data.pending_action_attempt_id && (
         <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12 }}>
           <strong>Перевірка активної дії</strong>
           <div style={muted}>
@@ -209,6 +211,12 @@ export default function TaskPage() {
               <div style={{ color: item.succeeded ? "#a9efc4" : "#ffaaa7" }}>{item.operation}: {item.succeeded ? "успішно" : "помилка"}</div>
               <div style={resultText}>{item.result_summary}</div>
               <ul style={list}>{item.verification_evidence.map((evidence) => <li key={evidence}>{evidence}</li>)}</ul>
+              {item.artifact_refs.length > 0 && (
+                <div>
+                  <div style={muted}>Артефакти</div>
+                  <ul style={list}>{item.artifact_refs.map((artifact) => <li key={artifact}>{artifact}</li>)}</ul>
+                </div>
+              )}
             </article>
           ))}
         </section>

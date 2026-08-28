@@ -1,14 +1,18 @@
 import os
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
+
+import pytest
+from fastapi.testclient import TestClient
 
 from alter_core import api as core_api
 from alter_core import botpress_gateway, conversation_api
 from alter_core.botpress_gateway import BotpressGateway
 from api.index import app
 from app.main import app as vercel_app
-from fastapi.testclient import TestClient
+from scripts.fetch_sealing_key import NoRedirectHandler, fetch_public_key
 
 
 def configure_owner(monkeypatch):
@@ -183,9 +187,36 @@ def test_botpress_workflows_separate_deploy_and_runtime_credentials():
     assert "CONTRACT_OUTCOME" in deploy
     assert "if contract_outcome == 'success'" in deploy
     assert "os.environ['BOTPRESS_RUNTIME_TOKEN']" in seal
-    assert "except urllib.error.HTTPError as exc" in seal
-    assert "recoverable =" in seal
-    assert "class NoRedirectHandler" in seal
-    assert "opener.open(request" in seal
-    assert "urllib.request.urlopen(request" not in seal
+    assert "python ALTER/core/scripts/fetch_sealing_key.py" in seal
     assert "Bot Access Key" in readme
+
+
+def test_public_key_bootstrap_rejects_redirect_without_forwarding_credentials():
+    captured_requests = []
+
+    class RedirectingOpener:
+        def open(self, request, timeout):
+            captured_requests.append((request, timeout))
+            raise urllib.error.HTTPError(
+                request.full_url,
+                302,
+                "Found",
+                None,
+                None,
+            )
+
+    with pytest.raises(urllib.error.HTTPError):
+        fetch_public_key(
+            url="https://alter.example/api/vault/bootstrap/public-key",
+            attempts=3,
+            sleep_seconds=0,
+            opener=RedirectingOpener(),
+            sleep=lambda _seconds: None,
+        )
+
+    assert len(captured_requests) == 1
+    request, timeout = captured_requests[0]
+    assert timeout == 20
+    assert request.get_header("Authorization") is None
+    assert request.get_header("BOTPRESS_RUNTIME_TOKEN") is None
+    assert NoRedirectHandler().redirect_request(None, None, 302, "Found", {}, "https://evil.example") is None

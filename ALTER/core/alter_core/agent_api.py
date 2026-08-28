@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .api import _audit, _get_owned_task, _memory_fallback, memory_store, orchestrator
+from .api import _audit, _commit_task_transition_with_record, _get_owned_task, orchestrator
 from .auth import Principal, require_owner
 from .botpress_contract import BotpressContractError, validate_specialist_output
 from .botpress_gateway import (
@@ -147,21 +147,15 @@ def plan_task(
         "side_effects_performed": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    if memory_store is not None:
-        memory_store.upsert(
-            workspace_id=principal.workspace_id,
-            user_id=principal.user_id,
+    try:
+        updated = _commit_task_transition_with_record(
+            task_id=task.id,
+            principal=principal,
             namespace="task.plan",
             key=str(task.id),
             value=plan_record,
+            transition=orchestrator.transition_mark_ready,
         )
-    else:
-        _memory_fallback[
-            (principal.workspace_id, principal.user_id, "task.plan", str(task.id))
-        ] = plan_record
-
-    try:
-        updated = orchestrator.mark_ready(task.id)
     except InvalidTaskTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     _audit(

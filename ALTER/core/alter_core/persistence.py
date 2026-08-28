@@ -12,6 +12,48 @@ from .models import Approval, PolicyRule, Task
 from .orchestrator import TaskNotFoundError
 
 
+def _lock_task(conn: Any, task_id: UUID) -> Task:
+    row = conn.execute(
+        """
+        SELECT id, workspace_id, owner_user_id, objective, status,
+               acceptance_criteria, current_step, blocker, pending_action,
+               created_at, updated_at
+        FROM tasks
+        WHERE id = %s
+        FOR UPDATE
+        """,
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        raise TaskNotFoundError(str(task_id))
+    return Task.model_validate(row)
+
+
+def _write_task(conn: Any, task: Task) -> None:
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = %s,
+            current_step = %s,
+            blocker = %s,
+            pending_action = %s,
+            updated_at = %s
+        WHERE id = %s AND workspace_id = %s
+        """,
+        (
+            task.status.value,
+            task.current_step,
+            task.blocker,
+            Jsonb(task.pending_action.model_dump(mode="json"))
+            if task.pending_action is not None
+            else None,
+            task.updated_at,
+            task.id,
+            task.workspace_id,
+        ),
+    )
+
+
 class PostgresTaskStore:
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
@@ -77,44 +119,9 @@ class PostgresTaskStore:
     ) -> Task:
         """Apply a transition to the latest row while holding a database lock."""
         with connect(self.dsn, row_factory=dict_row) as conn:
-            row = conn.execute(
-                """
-                SELECT id, workspace_id, owner_user_id, objective, status,
-                       acceptance_criteria, current_step, blocker, pending_action,
-                       created_at, updated_at
-                FROM tasks
-                WHERE id = %s
-                FOR UPDATE
-                """,
-                (task_id,),
-            ).fetchone()
-            if row is None:
-                raise TaskNotFoundError(str(task_id))
-
-            task = transition(Task.model_validate(row))
+            task = transition(_lock_task(conn, task_id))
             task.touch()
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = %s,
-                    current_step = %s,
-                    blocker = %s,
-                    pending_action = %s,
-                    updated_at = %s
-                WHERE id = %s AND workspace_id = %s
-                """,
-                (
-                    task.status.value,
-                    task.current_step,
-                    task.blocker,
-                    Jsonb(task.pending_action.model_dump(mode="json"))
-                    if task.pending_action is not None
-                    else None,
-                    task.updated_at,
-                    task.id,
-                    task.workspace_id,
-                ),
-            )
+            _write_task(conn, task)
         return task
 
     def transition_with_policy_rules(
@@ -126,21 +133,7 @@ class PostgresTaskStore:
     ) -> Task:
         """Lock the task, then load and apply the latest policies in one transaction."""
         with connect(self.dsn, row_factory=dict_row) as conn:
-            row = conn.execute(
-                """
-                SELECT id, workspace_id, owner_user_id, objective, status,
-                       acceptance_criteria, current_step, blocker, pending_action,
-                       created_at, updated_at
-                FROM tasks
-                WHERE id = %s
-                FOR UPDATE
-                """,
-                (task_id,),
-            ).fetchone()
-            if row is None:
-                raise TaskNotFoundError(str(task_id))
-
-            current = Task.model_validate(row)
+            current = _lock_task(conn, task_id)
             if current.owner_user_id != user_id:
                 raise PermissionError("Cross-owner task transition denied.")
             policy_rows = conn.execute(
@@ -156,28 +149,7 @@ class PostgresTaskStore:
             rules = [PolicyRule.model_validate(policy_row) for policy_row in policy_rows]
             task = transition(current, rules)
             task.touch()
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = %s,
-                    current_step = %s,
-                    blocker = %s,
-                    pending_action = %s,
-                    updated_at = %s
-                WHERE id = %s AND workspace_id = %s
-                """,
-                (
-                    task.status.value,
-                    task.current_step,
-                    task.blocker,
-                    Jsonb(task.pending_action.model_dump(mode="json"))
-                    if task.pending_action is not None
-                    else None,
-                    task.updated_at,
-                    task.id,
-                    task.workspace_id,
-                ),
-            )
+            _write_task(conn, task)
         return task
 
     def list_for_owner(
@@ -214,47 +186,12 @@ class PostgresTaskStore:
     ) -> Task:
         """Commit a task transition and its evidence record atomically."""
         with connect(self.dsn, row_factory=dict_row) as conn:
-            row = conn.execute(
-                """
-                SELECT id, workspace_id, owner_user_id, objective, status,
-                       acceptance_criteria, current_step, blocker, pending_action,
-                       created_at, updated_at
-                FROM tasks
-                WHERE id = %s
-                FOR UPDATE
-                """,
-                (task_id,),
-            ).fetchone()
-            if row is None:
-                raise TaskNotFoundError(str(task_id))
-
-            current = Task.model_validate(row)
+            current = _lock_task(conn, task_id)
             if current.owner_user_id != user_id:
                 raise PermissionError("Cross-owner task transition denied.")
             task = transition(current)
             task.touch()
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = %s,
-                    current_step = %s,
-                    blocker = %s,
-                    pending_action = %s,
-                    updated_at = %s
-                WHERE id = %s AND workspace_id = %s
-                """,
-                (
-                    task.status.value,
-                    task.current_step,
-                    task.blocker,
-                    Jsonb(task.pending_action.model_dump(mode="json"))
-                    if task.pending_action is not None
-                    else None,
-                    task.updated_at,
-                    task.id,
-                    task.workspace_id,
-                ),
-            )
+            _write_task(conn, task)
             conn.execute(
                 """
                 INSERT INTO memories (workspace_id, user_id, namespace, key, value)
@@ -456,6 +393,7 @@ class PostgresMemoryStore:
         namespace: str | None = None,
         key: str | None = None,
         key_prefix: str | None = None,
+        exclude_protected: bool = False,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         if key is not None and key_prefix is not None:
@@ -470,6 +408,13 @@ class PostgresMemoryStore:
         if namespace:
             query += " AND namespace = %s"
             params.append(namespace)
+        if exclude_protected:
+            query += """
+                AND NOT (
+                    left(lower(btrim(namespace)), 6) = '_vault'
+                    OR left(lower(btrim(namespace)), 12) = 'vault_secure'
+                )
+            """
         if key is not None:
             query += " AND key = %s"
             params.append(key)

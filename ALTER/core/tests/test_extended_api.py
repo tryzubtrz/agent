@@ -83,6 +83,20 @@ def test_redactor_preserves_vault_aliases_in_authorization_headers():
         assert safe == source
 
 
+def test_redactor_covers_json_authorization_and_preserves_vault_reference():
+    credential = "dXNlcjpwYXNzd29yZA=="
+    source = f'{{"Authorization":"Basic {credential}"}}'
+    safe, changed = conversation_api._redact(source)
+    assert changed is True
+    assert credential not in safe
+    assert safe == '{"Authorization":"[REDACTED]"}'
+
+    vault_source = '{"Authorization":"Basic vault:botpress_runtime"}'
+    vault_safe, vault_changed = conversation_api._redact(vault_source)
+    assert vault_changed is False
+    assert vault_safe == vault_source
+
+
 def test_conversation_ai_is_fail_closed_without_runtime_credential(monkeypatch):
     token = configure_owner(monkeypatch)
     monkeypatch.setattr(

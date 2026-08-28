@@ -26,8 +26,7 @@ from .api import (
 )
 from .auth import Principal, require_owner
 from .models import ActionRequest, ActionRisk, TaskStatus
-from .orchestrator import ApprovalMismatchError
-from .persistence import PostgresTaskStore
+from .orchestrator import ApprovalMismatchError, InvalidTaskTransitionError
 from .secret_safety import contains_high_confidence_secret, redact_secrets
 
 router = APIRouter()
@@ -226,6 +225,11 @@ def task_inspector(task_id: UUID, principal: Principal = Depends(require_owner))
         "action_results": action_results,
         "events": events,
         "pending_action_digest": task.pending_action.digest() if task.pending_action else None,
+        "pending_action_attempt_id": (
+            str(task.pending_action.attempt_id)
+            if task.pending_action is not None and task.pending_action.attempt_id is not None
+            else None
+        ),
     }
 
 
@@ -240,27 +244,17 @@ def task_meta(task_id: UUID, body: TaskMetaBody, principal: Principal = Depends(
 
 @router.post("/api/tasks/{task_id}/control")
 def task_control(task_id: UUID, body: TaskControlBody, principal: Principal = Depends(require_owner)) -> dict[str, Any]:
-    task = _get_owned_task(task_id, principal)
+    _get_owned_task(task_id, principal)
     if body.action == "authentication_complete":
         if principal.actor_role != "owner":
             raise HTTPException(status_code=403, detail="Only Owner can confirm completion of human authentication.")
         try:
-            if isinstance(orchestrator.store, PostgresTaskStore):
-                saved = orchestrator.store.transition_with_policy_rules(
-                    task_id=task_id,
-                    user_id=principal.user_id,
-                    transition=lambda candidate, current_rules: orchestrator.transition_after_human_auth(
-                        candidate,
-                        workspace_id=principal.workspace_id,
-                        owner_rules=current_rules,
-                    ),
-                )
-            else:
-                saved = orchestrator.resume_after_human_auth(
-                    task_id=task_id,
-                    workspace_id=principal.workspace_id,
-                    owner_rules=policy_store.list_for_workspace(principal.workspace_id),
-                )
+            saved = orchestrator.resume_after_human_auth(
+                task_id=task_id,
+                workspace_id=principal.workspace_id,
+                owner_rules=policy_store.list_for_workspace(principal.workspace_id),
+                owner_user_id=principal.user_id,
+            )
         except ApprovalMismatchError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         _audit(
@@ -270,36 +264,18 @@ def task_control(task_id: UUID, body: TaskControlBody, principal: Principal = De
             payload={"resulting_status": saved.status.value},
         )
         return saved.model_dump(mode="json")
-    if body.action == "pause":
-        if task.status not in {TaskStatus.READY, TaskStatus.EXECUTING, TaskStatus.RECOVERING}:
-            raise HTTPException(status_code=409, detail=f"Task cannot be paused from {task.status.value}.")
-        task.status = TaskStatus.PAUSED
-        task.blocker = body.reason or "Paused by owner."
-        task.current_step = "paused"
-    elif body.action == "resume":
-        if task.status != TaskStatus.PAUSED:
-            raise HTTPException(status_code=409, detail="Only paused tasks can be resumed.")
-        task.status = TaskStatus.EXECUTING if task.pending_action is not None else TaskStatus.READY
-        task.blocker = None
-        task.current_step = task.pending_action.operation if task.pending_action is not None else "resume_preflight"
-    elif body.action == "retry":
-        if task.status not in {TaskStatus.FAILED, TaskStatus.BLOCKED_BY_RULE, TaskStatus.RECOVERING}:
-            raise HTTPException(status_code=409, detail="Only failed or blocked tasks can be retried.")
-        task.status = TaskStatus.RECOVERING
-        task.blocker = body.reason
-        task.current_step = "retry_preflight"
-        task.pending_action = None
-    elif body.action == "cancel":
-        if task.status == TaskStatus.DONE:
-            raise HTTPException(status_code=409, detail="Completed task cannot be cancelled.")
-        task.status = TaskStatus.CANCELLED
-        task.blocker = body.reason or "Cancelled by owner."
-        task.current_step = "cancelled"
-        task.pending_action = None
-    else:
-        raise HTTPException(status_code=422, detail="Unsupported task control action.")
-    saved = orchestrator.store.save(task)
-    _audit(principal, event_type=f"task.{body.action}", task_id=task.id, payload={"reason": body.reason})
+    try:
+        saved = orchestrator.control_task(
+            task_id=task_id,
+            workspace_id=principal.workspace_id,
+            owner_user_id=principal.user_id,
+            action=body.action,
+            reason=body.reason,
+            owner_rules=policy_store.list_for_workspace(principal.workspace_id),
+        )
+    except (InvalidTaskTransitionError, ApprovalMismatchError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _audit(principal, event_type=f"task.{body.action}", task_id=saved.id, payload={"reason": body.reason})
     return saved.model_dump(mode="json")
 
 

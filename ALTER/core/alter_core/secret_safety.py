@@ -32,6 +32,11 @@ _SECRET_ASSIGNMENT = re.compile(
     rf"(?i)\b({_SECRET_LABEL})\s*[:=]\s*"
     rf"((?:(?:basic|bearer|token|apikey)\s+[^\s,;]{{4,}})|[^\s,;]{{6,}})"
 )
+_JSON_SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)([\"'](?:{_SECRET_LABEL})[\"']\s*:\s*[\"'])"
+    rf"((?:(?:basic|bearer|token|apikey)\s+[^\"']{{4,}})|[^\"']{{6,}})"
+    rf"([\"'])"
+)
 _SECRET_FIELD_NAME = re.compile(
     rf"(?i)^(?:{_SECRET_LABEL})$"
 )
@@ -55,6 +60,15 @@ def redact_secrets(text: str) -> tuple[str, bool]:
         if updated != safe:
             changed = True
             safe = updated
+    updated = _JSON_SECRET_ASSIGNMENT.sub(
+        lambda match: match.group(0)
+        if _is_vault_reference(match.group(2))
+        else f"{match.group(1)}[REDACTED]{match.group(3)}",
+        safe,
+    )
+    if updated != safe:
+        changed = True
+        safe = updated
     updated = _SECRET_ASSIGNMENT.sub(
         lambda match: match.group(0)
         if _is_vault_reference(match.group(2))

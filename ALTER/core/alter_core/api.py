@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from threading import RLock
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -54,7 +55,39 @@ else:
     STORAGE_MODE = "memory"
 
 orchestrator = TaskOrchestrator(store=task_store)
-_memory_fallback: dict[tuple[UUID, UUID, str, str], Any] = {}
+
+
+class _RecencyMemory(dict[tuple[UUID, UUID, str, str], Any]):
+    """Dictionary fallback whose iteration order mirrors updated_at DESC reads."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = RLock()
+
+    def __setitem__(self, key: tuple[UUID, UUID, str, str], value: Any) -> None:
+        with self._lock:
+            if super().__contains__(key):
+                super().__delitem__(key)
+            super().__setitem__(key, value)
+
+    def get(self, key: tuple[UUID, UUID, str, str], default: Any = None) -> Any:
+        with self._lock:
+            return super().get(key, default)
+
+    def pop(self, key: tuple[UUID, UUID, str, str], default: Any = None) -> Any:
+        with self._lock:
+            return super().pop(key, default)
+
+    def items(self) -> list[tuple[tuple[UUID, UUID, str, str], Any]]:
+        with self._lock:
+            return list(super().items())
+
+    def clear(self) -> None:
+        with self._lock:
+            super().clear()
+
+
+_memory_fallback: dict[tuple[UUID, UUID, str, str], Any] = _RecencyMemory()
 _connector_fallback: dict[tuple[UUID, str], dict[str, Any]] = {}
 
 
@@ -79,10 +112,7 @@ def _commit_task_transition_with_record(
             transition=transition,
         )
 
-    original = store.get(task_id).model_copy(deep=True)
-    updated = transition(original.model_copy(deep=True))
-    saved = store.save(updated)
-    try:
+    def persist_record() -> None:
         if memory_store is not None:
             memory_store.upsert(
                 workspace_id=principal.workspace_id,
@@ -95,10 +125,13 @@ def _commit_task_transition_with_record(
             _memory_fallback[
                 (principal.workspace_id, principal.user_id, namespace, key)
             ] = value
-    except Exception:
-        store.save(original)
-        raise
-    return saved
+
+    if isinstance(store, InMemoryTaskStore):
+        return store.transition_with_effect(task_id, transition, persist_record)
+
+    updated = store.transition(task_id, transition)
+    persist_record()
+    return updated
 
 
 def _clean_bounded_text_items(values: list[str], *, field_name: str, max_length: int) -> list[str]:
@@ -166,6 +199,7 @@ class CompleteTaskBody(BaseModel):
 
 class ActionResultBody(BaseModel):
     action_digest: str = Field(min_length=64, max_length=64)
+    attempt_id: UUID
     succeeded: bool
     result_summary: str = Field(min_length=1, max_length=10_000)
     verification_evidence: list[str] = Field(min_length=1, max_length=50)
@@ -383,6 +417,11 @@ def record_action_result(
         )
     if current.pending_action.digest() != body.action_digest:
         raise HTTPException(status_code=409, detail="Action result does not match the active action.")
+    if current.pending_action.attempt_id != body.attempt_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Action result does not match the active execution attempt.",
+        )
     if contains_high_confidence_secret(body.model_dump(mode="json")):
         raise HTTPException(
             status_code=422,
@@ -392,6 +431,7 @@ def record_action_result(
     execution_id = str(uuid4())
     result_record = {
         "execution_id": execution_id,
+        "attempt_id": str(body.attempt_id),
         "action_digest": body.action_digest,
         "operation": current.pending_action.operation,
         "target": current.pending_action.target,
@@ -402,7 +442,7 @@ def record_action_result(
         "verification_method": "owner_attestation",
     }
     try:
-        result_key = f"{task_id}:{body.action_digest}:{execution_id}"
+        result_key = f"{task_id}:{body.attempt_id}:{execution_id}"
         task = _commit_task_transition_with_record(
             task_id=task_id,
             principal=principal,
@@ -413,6 +453,7 @@ def record_action_result(
                 candidate,
                 workspace_id=principal.workspace_id,
                 action_digest=body.action_digest,
+                attempt_id=body.attempt_id,
                 succeeded=body.succeeded,
                 failure_reason=None if body.succeeded else body.result_summary,
             ),
@@ -426,6 +467,7 @@ def record_action_result(
         task_id=task.id,
         payload={
             "action_digest": body.action_digest,
+            "attempt_id": str(body.attempt_id),
             "succeeded": body.succeeded,
             "verification_evidence_count": len(body.verification_evidence),
             "artifact_count": len(body.artifact_refs),
@@ -484,6 +526,7 @@ def list_memory(
             workspace_id=principal.workspace_id,
             user_id=principal.user_id,
             namespace=namespace,
+            exclude_protected=True,
             limit=limit,
         )
         return [row for row in rows if not _is_protected_memory_namespace(str(row.get("namespace", "")))]
@@ -497,7 +540,7 @@ def list_memory(
         if _is_protected_memory_namespace(item_namespace):
             continue
         items.append({"namespace": item_namespace, "key": key, "value": value})
-    return items[:limit]
+    return list(reversed(items))[:limit]
 
 
 @app.put("/memory")
@@ -617,6 +660,7 @@ def evaluate_action(
         task = orchestrator.request_action(
             body.action,
             owner_rules=policy_store.list_for_workspace(principal.workspace_id),
+            owner_user_id=principal.user_id,
         )
         _audit(
             principal,
@@ -654,6 +698,7 @@ def approve_action(
             workspace_id=principal.workspace_id,
             action_digest=body.action_digest,
             owner_rules=policy_store.list_for_workspace(principal.workspace_id),
+            owner_user_id=principal.user_id,
         )
         if approval_store is not None:
             approval_store.save(approval, approved_by=principal.user_id)

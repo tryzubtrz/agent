@@ -431,6 +431,7 @@ def test_active_action_requires_digest_bound_owner_attestation(monkeypatch):
     action_digest = ActionRequest.model_validate(digest).digest()
     result = {
         "action_digest": action_digest,
+        "attempt_id": digest["attempt_id"],
         "succeeded": True,
         "result_summary": "The report was created and inspected.",
         "verification_evidence": ["Artifact opened successfully"],
@@ -488,12 +489,14 @@ def test_failed_action_enters_recovery_and_keeps_failure_evidence(monkeypatch):
         "requires_human_auth": False,
     }
     executing = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action}).json()
-    digest = ActionRequest.model_validate(executing["pending_action"]).digest()
+    pending = ActionRequest.model_validate(executing["pending_action"])
+    digest = pending.digest()
     failed = client.post(
         f"/api/tasks/{task['id']}/action-result",
         headers=auth(token),
         json={
             "action_digest": digest,
+            "attempt_id": str(pending.attempt_id),
             "succeeded": False,
             "result_summary": "The report generator returned an error.",
             "verification_evidence": ["Executor exit status was non-zero"],
@@ -522,12 +525,14 @@ def test_retried_identical_action_keeps_both_execution_results(monkeypatch):
     }
 
     first = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action}).json()
-    digest = ActionRequest.model_validate(first["pending_action"]).digest()
+    first_pending = ActionRequest.model_validate(first["pending_action"])
+    digest = first_pending.digest()
     failed = client.post(
         f"/api/tasks/{task['id']}/action-result",
         headers=auth(token),
         json={
             "action_digest": digest,
+            "attempt_id": str(first_pending.attempt_id),
             "succeeded": False,
             "result_summary": "First attempt failed.",
             "verification_evidence": ["Executor returned non-zero"],
@@ -543,11 +548,31 @@ def test_retried_identical_action_keeps_both_execution_results(monkeypatch):
 
     second = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action})
     assert second.status_code == 200
-    succeeded = client.post(
+    second_pending = ActionRequest.model_validate(second.json()["pending_action"])
+
+    delayed_first_result = client.post(
         f"/api/tasks/{task['id']}/action-result",
         headers=auth(token),
         json={
             "action_digest": digest,
+            "attempt_id": str(first_pending.attempt_id),
+            "succeeded": True,
+            "result_summary": "Delayed result from the first attempt.",
+            "verification_evidence": ["Late executor callback"],
+            "artifact_refs": [],
+        },
+    )
+    assert delayed_first_result.status_code == 409
+    still_active = client.get(f"/api/tasks/{task['id']}", headers=auth(token)).json()
+    assert still_active["status"] == "executing"
+    assert still_active["pending_action"]["attempt_id"] == str(second_pending.attempt_id)
+
+    succeeded = client.post(
+        f"/api/tasks/{task['id']}/action-result",
+        headers=auth(token),
+        json={
+            "action_digest": second_pending.digest(),
+            "attempt_id": str(second_pending.attempt_id),
             "succeeded": True,
             "result_summary": "Second attempt succeeded.",
             "verification_evidence": ["Artifact opened"],
@@ -560,10 +585,11 @@ def test_retried_identical_action_keeps_both_execution_results(monkeypatch):
         f"/api/tasks/{task['id']}/inspector",
         headers=auth(token),
     ).json()["action_results"]
-    matching = [item for item in results if item["action_digest"] == digest]
+    matching = [item for item in results if item["operation"] == "create_report"]
     assert len(matching) == 2
     assert {item["succeeded"] for item in matching} == {False, True}
     assert len({item["execution_id"] for item in matching}) == 2
+    assert len({item["attempt_id"] for item in matching}) == 2
 
 
 def test_pause_resume_restores_active_action_to_attestable_state(monkeypatch):
@@ -582,7 +608,8 @@ def test_pause_resume_restores_active_action_to_attestable_state(monkeypatch):
         "requires_human_auth": False,
     }
     executing = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action}).json()
-    digest = ActionRequest.model_validate(executing["pending_action"]).digest()
+    pending = ActionRequest.model_validate(executing["pending_action"])
+    digest = pending.digest()
 
     paused = client.post(
         f"/api/tasks/{task['id']}/control",
@@ -606,6 +633,7 @@ def test_pause_resume_restores_active_action_to_attestable_state(monkeypatch):
         headers=auth(token),
         json={
             "action_digest": digest,
+            "attempt_id": str(pending.attempt_id),
             "succeeded": True,
             "result_summary": "Report created.",
             "verification_evidence": ["Artifact opened"],
@@ -614,6 +642,50 @@ def test_pause_resume_restores_active_action_to_attestable_state(monkeypatch):
     )
     assert verified.status_code == 200
     assert verified.json()["status"] == "ready"
+
+
+def test_resume_rechecks_policy_added_while_action_is_paused(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(app)
+    task = create_task(client, token)
+    assert client.post(f"/api/tasks/{task['id']}/ready", headers=auth(token)).status_code == 200
+    action = {
+        "workspace_id": task["workspace_id"],
+        "task_id": task["id"],
+        "category": "files",
+        "operation": "create_report",
+        "risk": "reversible",
+        "target": "artifact:audit-report",
+        "parameters": {},
+        "requires_human_auth": False,
+    }
+    executing = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action})
+    assert executing.status_code == 200
+    assert client.post(
+        f"/api/tasks/{task['id']}/control",
+        headers=auth(token),
+        json={"action": "pause"},
+    ).status_code == 200
+    denied = client.post(
+        "/api/policies",
+        headers=auth(token),
+        json={
+            "original_text": "Do not run file actions",
+            "category": "files",
+            "effect": "deny",
+            "priority": 1,
+        },
+    )
+    assert denied.status_code == 200
+
+    resumed = client.post(
+        f"/api/tasks/{task['id']}/control",
+        headers=auth(token),
+        json={"action": "resume"},
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["status"] == "blocked_by_rule"
+    assert resumed.json()["pending_action"] is None
 
 
 def test_owner_can_resume_action_after_completing_human_auth(monkeypatch):
@@ -694,7 +766,8 @@ def test_action_result_rolls_back_when_evidence_persistence_fails(monkeypatch):
         "requires_human_auth": False,
     }
     executing = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action}).json()
-    digest = ActionRequest.model_validate(executing["pending_action"]).digest()
+    pending = ActionRequest.model_validate(executing["pending_action"])
+    digest = pending.digest()
 
     class FailingMemoryStore:
         def upsert(self, **_kwargs):
@@ -706,6 +779,7 @@ def test_action_result_rolls_back_when_evidence_persistence_fails(monkeypatch):
         headers=auth(token),
         json={
             "action_digest": digest,
+            "attempt_id": str(pending.attempt_id),
             "succeeded": True,
             "result_summary": "Report created.",
             "verification_evidence": ["Artifact opened"],
@@ -783,6 +857,20 @@ def test_task_inspector_filters_evidence_before_applying_limits(monkeypatch):
         {"execution_id": "attempt-2", "succeeded": True},
         {"execution_id": "attempt-1", "succeeded": False},
     ]
+
+
+def test_fallback_memory_update_moves_existing_key_to_newest_position(monkeypatch):
+    principal = Principal(user_id=uuid4(), workspace_id=uuid4())
+    monkeypatch.setattr(productivity_api, "memory_store", None)
+    first_key = (principal.workspace_id, principal.user_id, "automation", "first")
+    second_key = (principal.workspace_id, principal.user_id, "automation", "second")
+    core_api._memory_fallback[first_key] = {"version": 1}
+    core_api._memory_fallback[second_key] = {"version": 1}
+    core_api._memory_fallback[first_key] = {"version": 2}
+
+    rows = productivity_api._memory_list(principal, "automation", 2)
+    assert [row["key"] for row in rows] == ["first", "second"]
+    assert rows[0]["value"] == {"version": 2}
 
 
 def test_compound_secret_field_names_are_rejected_but_vault_aliases_are_allowed():
