@@ -22,6 +22,7 @@ function can(member: MemberSession, path: string[], method: string): boolean {
   const route = path.join("/");
   const capabilities = new Set(member.capabilities);
   if (route === "gateway/posthog/capture" && method === "POST") return true;
+  if (route === "health" && (method === "GET" || method === "HEAD")) return true;
   if (["vault", "policies", "access", "gateway", "actions", "approvals", "settings"].includes(top)) return false;
   if (route.includes("/approve") || route.includes("/reject")) return false;
 
@@ -99,3 +100,4 @@ export const POST = proxy;
 export const PUT = proxy;
 export const PATCH = proxy;
 export const DELETE = proxy;
+

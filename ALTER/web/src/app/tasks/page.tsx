@@ -47,32 +47,57 @@ export default function TasksPage() {
     setBusy(true);
     setError("");
     setNotice("");
+
+    let task: Task;
     try {
-      const task = await core<Task>("/tasks", {
+      task = await core<Task>("/tasks", {
         method: "POST",
         body: JSON.stringify({ objective: value, acceptance_criteria: [DEFAULT_ACCEPTANCE_CRITERION] }),
       });
-      await core(`/tasks/${task.id}/meta`, {
-        method: "PUT",
-        body: JSON.stringify({ expected_result: value, deadline: null, autonomy: "balanced", sources: [], notes: null }),
-      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не вдалося створити задачу");
+      setBusy(false);
+      return;
+    }
+
+    // Creation is the only atomic step. Never report it as failed after Core has
+    // returned a task id: retrying from that state would create a duplicate task.
+    setObjective("");
+    const followUpErrors: string[] = [];
+    let plannedStatus = "";
+
+    try {
+      try {
+        await core(`/tasks/${task.id}/meta`, {
+          method: "PUT",
+          body: JSON.stringify({ expected_result: value, deadline: null, autonomy: "balanced", sources: [], notes: null }),
+        });
+      } catch (metaError) {
+        followUpErrors.push(metaError instanceof Error ? metaError.message : "Метадані задачі не збережено");
+      }
 
       try {
         const planned = await core<PlannedTask>(`/tasks/${task.id}/plan`, {
           method: "POST",
           body: JSON.stringify({ mode: "plan", context: "" }),
         });
-        setNotice(`Задачу створено і сплановано. Статус: ${planned.task.status}.`);
+        plannedStatus = planned.task.status;
       } catch (planError) {
-        setNotice("Задачу створено, але ALTER не зміг автоматично сформувати план. Відкрий Task Inspector — задача не втрачена.");
-        setError(planError instanceof Error ? planError.message : "Автопланування не виконано");
+        followUpErrors.push(planError instanceof Error ? planError.message : "Автопланування не виконано");
       }
 
-      setObjective("");
       await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Не вдалося створити задачу");
-    } finally { setBusy(false); }
+      if (followUpErrors.length === 0) {
+        setNotice(`Задачу створено і сплановано. Статус: ${plannedStatus}.`);
+      } else if (plannedStatus) {
+        setNotice(`Задачу створено і сплановано зі статусом ${plannedStatus}, але частину метаданих не вдалося зберегти. Задача не втрачена.`);
+      } else {
+        setNotice("Задачу створено, але ALTER не зміг завершити автоматичне налаштування. Відкрий Task Inspector — задача не втрачена.");
+      }
+      setError(followUpErrors.join(" · "));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -109,3 +134,4 @@ export default function TasksPage() {
 
 const input: React.CSSProperties = { width: "100%", border: "1px solid rgba(255,255,255,.1)", background: "rgba(0,0,0,.2)", color: "#fff", borderRadius: 12, padding: 12, outline: "none", font: "inherit" };
 const badge: React.CSSProperties = { whiteSpace: "nowrap", border: "1px solid rgba(143,126,255,.25)", background: "rgba(111,91,255,.08)", color: "#c9c2ff", borderRadius: 999, padding: "5px 8px", fontSize: 10 };
+
