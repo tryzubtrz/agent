@@ -13,6 +13,13 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         r"\1[REDACTED]\3",
     ),
     (
+        re.compile(
+            r"(?i)\b((?:proxy-)?authorization\s*[:=]\s*)"
+            r"(basic|bearer|token|apikey)\s+([A-Za-z0-9._~+/=-]{4,})"
+        ),
+        r"\1\2 [REDACTED]",
+    ),
+    (
         re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
         "[REDACTED_JWT]",
     ),
@@ -71,6 +78,8 @@ def contains_high_confidence_secret(value: Any) -> bool:
         return changed
     if isinstance(value, dict):
         for key, item in value.items():
+            if isinstance(key, str) and contains_high_confidence_secret(key):
+                return True
             if (
                 isinstance(key, str)
                 and _SECRET_FIELD_NAME.fullmatch(key.strip())

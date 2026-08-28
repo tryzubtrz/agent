@@ -1,7 +1,6 @@
 from uuid import uuid4
 
 import pytest
-
 from alter_core.models import (
     ActionRequest,
     ActionRisk,
@@ -9,7 +8,12 @@ from alter_core.models import (
     PolicyRule,
     TaskStatus,
 )
-from alter_core.orchestrator import ApprovalMismatchError, TaskOrchestrator
+from alter_core.orchestrator import (
+    ApprovalMismatchError,
+    InMemoryTaskStore,
+    InvalidTaskTransitionError,
+    TaskOrchestrator,
+)
 from alter_core.policy import PolicyEngine
 
 
@@ -181,6 +185,92 @@ def test_human_authentication_pauses_instead_of_bypassing():
 
     assert waiting.status == TaskStatus.AWAITING_LOGIN
     assert waiting.pending_action is not None
+
+
+def test_human_authentication_resume_rechecks_policy_and_restores_execution():
+    orchestrator = TaskOrchestrator()
+    workspace_id = uuid4()
+    task = orchestrator.create_task(
+        workspace_id=workspace_id,
+        owner_user_id=uuid4(),
+        objective="Open authenticated service",
+    )
+    orchestrator.mark_ready(task.id)
+    action = make_action(
+        workspace_id=workspace_id,
+        task_id=task.id,
+        category="service_login",
+        risk=ActionRisk.AUTHENTICATION,
+        operation="login",
+        requires_human_auth=True,
+    )
+    allow_after_login = PolicyRule(
+        workspace_id=workspace_id,
+        original_text="Allow this owner-authenticated login",
+        category="service_login",
+        effect=PolicyEffect.ALLOW,
+        priority=1,
+    )
+
+    waiting = orchestrator.request_action(action, owner_rules=[allow_after_login])
+    assert waiting.status == TaskStatus.AWAITING_LOGIN
+
+    resumed = orchestrator.resume_after_human_auth(
+        task_id=task.id,
+        workspace_id=workspace_id,
+        owner_rules=[allow_after_login],
+    )
+    assert resumed.status == TaskStatus.EXECUTING
+    assert resumed.pending_action == action
+
+    verified = orchestrator.record_action_result(
+        task_id=task.id,
+        workspace_id=workspace_id,
+        action_digest=action.digest(),
+        succeeded=True,
+    )
+    assert verified.status == TaskStatus.READY
+
+
+def test_action_guard_runs_against_latest_locked_task_state():
+    class ConcurrentStore(InMemoryTaskStore):
+        injected_action: ActionRequest | None = None
+
+        def transition(self, task_id, transition):
+            if self.injected_action is not None:
+                latest = self._tasks[task_id].model_copy(deep=True)
+                latest.status = TaskStatus.EXECUTING
+                latest.pending_action = self.injected_action
+                self._tasks[task_id] = latest
+                self.injected_action = None
+            return super().transition(task_id, transition)
+
+    store = ConcurrentStore()
+    orchestrator = TaskOrchestrator(store=store)
+    workspace_id = uuid4()
+    task = orchestrator.create_task(
+        workspace_id=workspace_id,
+        owner_user_id=uuid4(),
+        objective="Do one action at a time",
+    )
+    orchestrator.mark_ready(task.id)
+    first = make_action(
+        workspace_id=workspace_id,
+        task_id=task.id,
+        operation="first",
+    )
+    second = make_action(
+        workspace_id=workspace_id,
+        task_id=task.id,
+        operation="second",
+    )
+    store.injected_action = first
+
+    with pytest.raises(InvalidTaskTransitionError, match="active action"):
+        orchestrator.request_action(second)
+
+    retained = store.get(task.id)
+    assert retained.pending_action == first
 
 
 def test_approval_rechecks_current_policy_and_rejects_stale_authority():

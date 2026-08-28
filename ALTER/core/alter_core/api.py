@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
@@ -389,7 +389,9 @@ def record_action_result(
             detail="Secret-like content is not allowed in action results or verification evidence.",
         )
 
+    execution_id = str(uuid4())
     result_record = {
+        "execution_id": execution_id,
         "action_digest": body.action_digest,
         "operation": current.pending_action.operation,
         "target": current.pending_action.target,
@@ -400,7 +402,7 @@ def record_action_result(
         "verification_method": "owner_attestation",
     }
     try:
-        result_key = f"{task_id}:{body.action_digest}"
+        result_key = f"{task_id}:{body.action_digest}:{execution_id}"
         task = _commit_task_transition_with_record(
             task_id=task_id,
             principal=principal,

@@ -2,7 +2,7 @@ import os
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
-from alter_core import agent_api, conversation_api
+from alter_core import agent_api, conversation_api, productivity_api
 from alter_core import api as core_api
 from alter_core.auth import Principal
 from alter_core.models import ActionRequest
@@ -462,7 +462,9 @@ def test_active_action_requires_digest_bound_owner_attestation(monkeypatch):
 
     inspector = client.get(f"/api/tasks/{task['id']}/inspector", headers=auth(token))
     assert inspector.status_code == 200
-    assert inspector.json()["action_results"][-1] == {
+    action_result = inspector.json()["action_results"][-1]
+    assert UUID(action_result.pop("execution_id"))
+    assert action_result == {
         **result,
         "operation": "create_report",
         "target": "artifact:audit-report",
@@ -501,6 +503,67 @@ def test_failed_action_enters_recovery_and_keeps_failure_evidence(monkeypatch):
     assert failed.status_code == 200
     assert failed.json()["status"] == "recovering"
     assert "returned an error" in failed.json()["blocker"]
+
+
+def test_retried_identical_action_keeps_both_execution_results(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(app)
+    task = create_task(client, token)
+    assert client.post(f"/api/tasks/{task['id']}/ready", headers=auth(token)).status_code == 200
+    action = {
+        "workspace_id": task["workspace_id"],
+        "task_id": task["id"],
+        "category": "files",
+        "operation": "create_report",
+        "risk": "reversible",
+        "target": "artifact:audit-report",
+        "parameters": {},
+        "requires_human_auth": False,
+    }
+
+    first = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action}).json()
+    digest = ActionRequest.model_validate(first["pending_action"]).digest()
+    failed = client.post(
+        f"/api/tasks/{task['id']}/action-result",
+        headers=auth(token),
+        json={
+            "action_digest": digest,
+            "succeeded": False,
+            "result_summary": "First attempt failed.",
+            "verification_evidence": ["Executor returned non-zero"],
+            "artifact_refs": [],
+        },
+    )
+    assert failed.status_code == 200
+    assert client.post(
+        f"/api/tasks/{task['id']}/control",
+        headers=auth(token),
+        json={"action": "retry"},
+    ).status_code == 200
+
+    second = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action})
+    assert second.status_code == 200
+    succeeded = client.post(
+        f"/api/tasks/{task['id']}/action-result",
+        headers=auth(token),
+        json={
+            "action_digest": digest,
+            "succeeded": True,
+            "result_summary": "Second attempt succeeded.",
+            "verification_evidence": ["Artifact opened"],
+            "artifact_refs": ["artifact:audit-report"],
+        },
+    )
+    assert succeeded.status_code == 200
+
+    results = client.get(
+        f"/api/tasks/{task['id']}/inspector",
+        headers=auth(token),
+    ).json()["action_results"]
+    matching = [item for item in results if item["action_digest"] == digest]
+    assert len(matching) == 2
+    assert {item["succeeded"] for item in matching} == {False, True}
+    assert len({item["execution_id"] for item in matching}) == 2
 
 
 def test_pause_resume_restores_active_action_to_attestable_state(monkeypatch):
@@ -551,6 +614,42 @@ def test_pause_resume_restores_active_action_to_attestable_state(monkeypatch):
     )
     assert verified.status_code == 200
     assert verified.json()["status"] == "ready"
+
+
+def test_owner_can_resume_action_after_completing_human_auth(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(app)
+    task = create_task(client, token)
+    assert client.post(f"/api/tasks/{task['id']}/ready", headers=auth(token)).status_code == 200
+    action = {
+        "workspace_id": task["workspace_id"],
+        "task_id": task["id"],
+        "category": "files",
+        "operation": "read_authenticated_file",
+        "risk": "read",
+        "target": "owner:file",
+        "parameters": {},
+        "requires_human_auth": True,
+    }
+    waiting = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action})
+    assert waiting.status_code == 200
+    assert waiting.json()["status"] == "awaiting_login"
+
+    operator = client.post(
+        f"/api/tasks/{task['id']}/control",
+        headers={**auth(token), "X-ALTER-Actor-Role": "operator"},
+        json={"action": "authentication_complete"},
+    )
+    assert operator.status_code == 403
+
+    resumed = client.post(
+        f"/api/tasks/{task['id']}/control",
+        headers=auth(token),
+        json={"action": "authentication_complete"},
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["status"] == "executing"
+    assert resumed.json()["pending_action"]["operation"] == "read_authenticated_file"
 
 
 def test_completion_rolls_back_when_evidence_persistence_fails(monkeypatch):
@@ -655,6 +754,33 @@ def test_typed_memory_validates_every_field_and_delete_route_is_reachable(monkey
     assert all(item["key"] != "typed-one" for item in listed["items"])
 
 
+def test_task_inspector_filters_evidence_before_applying_limits(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(app)
+    task = create_task(client, token)
+    workspace_id = UUID(task["workspace_id"])
+    user_id = UUID(os.environ["ALTER_OWNER_USER_ID"])
+    monkeypatch.setattr(productivity_api, "memory_store", None)
+
+    for index in range(260):
+        core_api._memory_fallback[
+            (workspace_id, user_id, "task.plan", f"unrelated-{index}")
+        ] = {"plan": f"unrelated {index}"}
+    core_api._memory_fallback[
+        (workspace_id, user_id, "task.plan", task["id"])
+    ] = {"plan": "target plan", "provider": "test"}
+    core_api._memory_fallback[
+        (workspace_id, user_id, "task.action_result", f"{task['id']}:attempt")
+    ] = {"execution_id": "attempt", "succeeded": True}
+
+    inspector = client.get(f"/api/tasks/{task['id']}/inspector", headers=auth(token))
+    assert inspector.status_code == 200
+    assert inspector.json()["plan"]["plan"] == "target plan"
+    assert inspector.json()["action_results"] == [
+        {"execution_id": "attempt", "succeeded": True}
+    ]
+
+
 def test_compound_secret_field_names_are_rejected_but_vault_aliases_are_allowed():
     for field_name in (
         "client_secret",
@@ -665,6 +791,7 @@ def test_compound_secret_field_names_are_rejected_but_vault_aliases_are_allowed(
     ):
         assert contains_high_confidence_secret({field_name: "high-confidence-secret-value"}) is True
         assert contains_high_confidence_secret({field_name: "vault:approved_alias"}) is False
+    assert contains_high_confidence_secret({"ghp_" + "A" * 30: "credential"}) is True
 
 
 def test_rag_paths_exclude_normalized_runtime_vault_namespaces(monkeypatch):

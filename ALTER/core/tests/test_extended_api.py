@@ -65,6 +65,14 @@ def test_redactor_covers_database_urls_jwts_and_private_keys():
     assert "[REDACTED_PRIVATE_KEY]" in safe
 
 
+def test_redactor_covers_basic_authorization_credentials():
+    credential = "dXNlcjpwYXNzd29yZA=="
+    safe, changed = conversation_api._redact(f"Authorization: Basic {credential}")
+    assert changed is True
+    assert credential not in safe
+    assert safe == "Authorization: Basic [REDACTED]"
+
+
 def test_conversation_ai_is_fail_closed_without_runtime_credential(monkeypatch):
     token = configure_owner(monkeypatch)
     monkeypatch.setattr(

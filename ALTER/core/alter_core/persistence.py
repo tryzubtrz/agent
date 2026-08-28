@@ -70,6 +70,53 @@ class PostgresTaskStore:
             raise TaskNotFoundError(str(task_id))
         return Task.model_validate(row)
 
+    def transition(
+        self,
+        task_id: UUID,
+        transition: Callable[[Task], Task],
+    ) -> Task:
+        """Apply a transition to the latest row while holding a database lock."""
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            row = conn.execute(
+                """
+                SELECT id, workspace_id, owner_user_id, objective, status,
+                       acceptance_criteria, current_step, blocker, pending_action,
+                       created_at, updated_at
+                FROM tasks
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise TaskNotFoundError(str(task_id))
+
+            task = transition(Task.model_validate(row))
+            task.touch()
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = %s,
+                    current_step = %s,
+                    blocker = %s,
+                    pending_action = %s,
+                    updated_at = %s
+                WHERE id = %s AND workspace_id = %s
+                """,
+                (
+                    task.status.value,
+                    task.current_step,
+                    task.blocker,
+                    Jsonb(task.pending_action.model_dump(mode="json"))
+                    if task.pending_action is not None
+                    else None,
+                    task.updated_at,
+                    task.id,
+                    task.workspace_id,
+                ),
+            )
+        return task
+
     def list_for_owner(
         self,
         workspace_id: UUID,
@@ -287,6 +334,27 @@ class PostgresAuditStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_for_task(
+        self,
+        workspace_id: UUID,
+        task_id: UUID,
+        *,
+        limit: int = 250,
+    ) -> list[dict[str, Any]]:
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_id, task_id, actor_type, actor_id,
+                       event_type, payload, created_at
+                FROM audit_events
+                WHERE workspace_id = %s AND task_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (workspace_id, task_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
 
 class PostgresMemoryStore:
     def __init__(self, dsn: str) -> None:
@@ -323,8 +391,12 @@ class PostgresMemoryStore:
         workspace_id: UUID,
         user_id: UUID,
         namespace: str | None = None,
+        key: str | None = None,
+        key_prefix: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
+        if key is not None and key_prefix is not None:
+            raise ValueError("Memory queries cannot combine key and key_prefix.")
         query = """
             SELECT id, workspace_id, user_id, namespace, key, value,
                    created_at, updated_at
@@ -335,6 +407,12 @@ class PostgresMemoryStore:
         if namespace:
             query += " AND namespace = %s"
             params.append(namespace)
+        if key is not None:
+            query += " AND key = %s"
+            params.append(key)
+        elif key_prefix is not None:
+            query += " AND left(key, char_length(%s)) = %s"
+            params.extend((key_prefix, key_prefix))
         query += " ORDER BY updated_at DESC LIMIT %s"
         params.append(limit)
         with connect(self.dsn, row_factory=dict_row) as conn:

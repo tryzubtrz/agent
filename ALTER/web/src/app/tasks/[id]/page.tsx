@@ -10,7 +10,7 @@ type Task = { id: string; objective: string; status: string; current_step?: stri
 type Event = { id: number; event_type: string; created_at: string; payload: Record<string, unknown> };
 type TaskPlan = { plan: string; provider: string; mode: string; boundary: string; side_effects_performed: false; created_at: string };
 type TaskResult = { result_summary: string; verification_evidence: string[]; artifact_refs: string[]; acceptance_criteria_met: true; verification_method: "owner_attestation" };
-type ActionResult = { action_digest: string; operation: string; target?: string | null; succeeded: boolean; result_summary: string; verification_evidence: string[]; artifact_refs: string[]; verification_method: "owner_attestation" };
+type ActionResult = { execution_id?: string; action_digest: string; operation: string; target?: string | null; succeeded: boolean; result_summary: string; verification_evidence: string[]; artifact_refs: string[]; verification_method: "owner_attestation" };
 type Inspector = {
   task: Task;
   meta: Record<string, unknown>;
@@ -53,7 +53,7 @@ export default function TaskPage() {
   }, [id]);
   useEffect(() => { void refresh(); }, [refresh]);
 
-  async function control(action: "pause" | "resume" | "retry" | "cancel") {
+  async function control(action: "pause" | "resume" | "retry" | "cancel" | "authentication_complete") {
     setBusy(true);
     try { await core(`/tasks/${id}/control`, { method: "POST", body: JSON.stringify({ action }) }); await refresh(); }
     catch (err) { setError(err instanceof Error ? err.message : "Дія не виконана"); }
@@ -144,6 +144,7 @@ export default function TaskPage() {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {canPause && <button disabled={busy} onClick={() => void control('pause')} style={primary}>Пауза</button>}
           {task.status === 'paused' && <button disabled={busy} onClick={() => void control('resume')} style={primary}>Продовжити</button>}
+          {['awaiting_login','awaiting_mfa'].includes(task.status) && <button disabled={busy} onClick={() => void control('authentication_complete')} style={primary}>Я завершив вхід / 2FA</button>}
           {['failed','blocked_by_rule','recovering'].includes(task.status) && <button disabled={busy} onClick={() => void control('retry')} style={primary}>Повторити</button>}
           {!['done','cancelled'].includes(task.status) && <button disabled={busy} onClick={() => void control('cancel')} style={danger}>Скасувати</button>}
         </div>
@@ -203,8 +204,8 @@ export default function TaskPage() {
       {data.action_results.length > 0 && (
         <section style={{ ...panel, display: "grid", gap: 9, marginTop: 12 }}>
           <strong>Результати дій</strong>
-          {data.action_results.map((item) => (
-            <article key={item.action_digest} style={{ borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 9 }}>
+          {data.action_results.map((item, index) => (
+            <article key={item.execution_id || `${item.action_digest}:${index}`} style={{ borderTop: "1px solid rgba(255,255,255,.08)", paddingTop: 9 }}>
               <div style={{ color: item.succeeded ? "#a9efc4" : "#ffaaa7" }}>{item.operation}: {item.succeeded ? "успішно" : "помилка"}</div>
               <div style={resultText}>{item.result_summary}</div>
               <ul style={list}>{item.verification_evidence.map((evidence) => <li key={evidence}>{evidence}</li>)}</ul>

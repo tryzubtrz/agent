@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from threading import RLock
 from typing import Protocol
 from uuid import UUID
 
@@ -40,6 +42,12 @@ class TaskStore(Protocol):
 
     def get(self, task_id: UUID) -> Task: ...
 
+    def transition(
+        self,
+        task_id: UUID,
+        transition: Callable[[Task], Task],
+    ) -> Task: ...
+
     def list_for_owner(
         self,
         workspace_id: UUID,
@@ -54,6 +62,7 @@ class InMemoryTaskStore:
 
     def __init__(self) -> None:
         self._tasks: dict[UUID, Task] = {}
+        self._lock = RLock()
 
     def save(self, task: Task) -> Task:
         task.touch()
@@ -65,6 +74,16 @@ class InMemoryTaskStore:
             return self._tasks[task_id]
         except KeyError as exc:
             raise TaskNotFoundError(str(task_id)) from exc
+
+    def transition(
+        self,
+        task_id: UUID,
+        transition: Callable[[Task], Task],
+    ) -> Task:
+        """Apply a state transition against the latest task under one lock."""
+        with self._lock:
+            current = self.get(task_id).model_copy(deep=True)
+            return self.save(transition(current))
 
     def list_for_owner(
         self,
@@ -131,55 +150,56 @@ class TaskOrchestrator:
         *,
         owner_rules: list[PolicyRule] | None = None,
     ) -> Task:
-        task = self.store.get(action.task_id)
-        self._assert_same_workspace(task, action.workspace_id)
-
         if contains_high_confidence_secret(action.model_dump(mode="json")):
             raise SecretBearingActionError(
                 "Raw secret-like values are not allowed in actions. Use an ALTER Vault alias."
             )
 
-        if task.status not in {
-            TaskStatus.READY,
-            TaskStatus.EXECUTING,
-            TaskStatus.RECOVERING,
-        }:
-            raise InvalidTaskTransitionError(
-                f"Task cannot request an action from {task.status.value}."
-            )
+        def apply(current: Task) -> Task:
+            self._assert_same_workspace(current, action.workspace_id)
 
-        if task.pending_action is not None:
-            raise InvalidTaskTransitionError(
-                "The active action must be verified or cancelled before a new action is requested."
-            )
+            if current.status not in {
+                TaskStatus.READY,
+                TaskStatus.EXECUTING,
+                TaskStatus.RECOVERING,
+            }:
+                raise InvalidTaskTransitionError(
+                    f"Task cannot request an action from {current.status.value}."
+                )
 
-        decision = self.policy_engine.evaluate(action, owner_rules or [])
+            if current.pending_action is not None:
+                raise InvalidTaskTransitionError(
+                    "The active action must be verified or cancelled before a new action is requested."
+                )
 
-        if decision.effect == PolicyEffect.DENY:
-            task.status = TaskStatus.BLOCKED_BY_RULE
-            task.blocker = decision.reason
-            task.pending_action = None
-            return self.store.save(task)
+            decision = self.policy_engine.evaluate(action, owner_rules or [])
 
-        if action.requires_human_auth:
-            task.status = TaskStatus.AWAITING_LOGIN
-            task.blocker = "Human authentication is required."
-            task.pending_action = action
-            return self.store.save(task)
+            if decision.effect == PolicyEffect.DENY:
+                current.status = TaskStatus.BLOCKED_BY_RULE
+                current.blocker = decision.reason
+                current.pending_action = None
+                return current
 
-        if decision.effect == PolicyEffect.REQUIRE_APPROVAL:
-            task.status = TaskStatus.AWAITING_APPROVAL
-            task.blocker = decision.reason
-            task.pending_action = action
-            return self.store.save(task)
+            if action.requires_human_auth:
+                current.status = TaskStatus.AWAITING_LOGIN
+                current.blocker = "Human authentication is required."
+                current.pending_action = action
+                return current
 
-        task.status = TaskStatus.EXECUTING
-        task.current_step = action.operation
-        task.blocker = None
-        # Keep the exact active action attached until execution is verified. This
-        # prevents an executor from losing the approved parameters/digest.
-        task.pending_action = action
-        return self.store.save(task)
+            if decision.effect == PolicyEffect.REQUIRE_APPROVAL:
+                current.status = TaskStatus.AWAITING_APPROVAL
+                current.blocker = decision.reason
+                current.pending_action = action
+                return current
+
+            current.status = TaskStatus.EXECUTING
+            current.current_step = action.operation
+            current.blocker = None
+            # Keep the exact active action attached until execution is verified.
+            current.pending_action = action
+            return current
+
+        return self.store.transition(action.task_id, apply)
 
     def approve_pending_action(
         self,
@@ -226,17 +246,40 @@ class TaskOrchestrator:
         # been granted. The action is cleared only after verified completion.
         return self.store.save(task), approval
 
-    def resume_after_human_auth(self, *, task_id: UUID, workspace_id: UUID) -> Task:
-        task = self.store.get(task_id)
-        self._assert_same_workspace(task, workspace_id)
+    def resume_after_human_auth(
+        self,
+        *,
+        task_id: UUID,
+        workspace_id: UUID,
+        owner_rules: list[PolicyRule] | None = None,
+    ) -> Task:
+        def apply(task: Task) -> Task:
+            self._assert_same_workspace(task, workspace_id)
 
-        if task.status not in {TaskStatus.AWAITING_LOGIN, TaskStatus.AWAITING_MFA}:
-            raise ApprovalMismatchError("Task is not waiting for human authentication.")
+            if task.status not in {TaskStatus.AWAITING_LOGIN, TaskStatus.AWAITING_MFA}:
+                raise ApprovalMismatchError("Task is not waiting for human authentication.")
+            if task.pending_action is None:
+                raise ApprovalMismatchError("Authenticated task has no pending action.")
 
-        task.status = TaskStatus.READY
-        task.current_step = "policy_recheck_after_human_auth"
-        task.blocker = None
-        return self.store.save(task)
+            decision = self.policy_engine.evaluate(task.pending_action, owner_rules or [])
+            if decision.effect == PolicyEffect.DENY:
+                task.status = TaskStatus.BLOCKED_BY_RULE
+                task.current_step = "policy_recheck_after_human_auth"
+                task.blocker = decision.reason
+                task.pending_action = None
+                return task
+            if decision.effect == PolicyEffect.REQUIRE_APPROVAL:
+                task.status = TaskStatus.AWAITING_APPROVAL
+                task.current_step = "approval_after_human_auth"
+                task.blocker = decision.reason
+                return task
+
+            task.status = TaskStatus.EXECUTING
+            task.current_step = task.pending_action.operation
+            task.blocker = None
+            return task
+
+        return self.store.transition(task_id, apply)
 
     def complete_task(
         self,

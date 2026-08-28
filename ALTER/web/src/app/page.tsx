@@ -408,7 +408,7 @@ function TasksScreen({ tasks, refresh }: { tasks: Task[]; refresh: () => Promise
         {tasks.length === 0 && <p style={{ color: "var(--muted)" }}>Ще немає задач. Створи першу на головному екрані.</p>}
         {tasks.map((task) => (
           <article key={task.id} className="ruleCard" style={{ borderRadius: 16, padding: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><strong>{task.objective}</strong><StatusChip tone={task.status === "failed" || task.status === "blocked_by_rule" ? "red" : task.status === "awaiting_approval" ? "amber" : "green"}>{statusLabel[task.status]}</StatusChip></div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><strong>{task.objective}</strong><StatusChip tone={task.status === "failed" || task.status === "blocked_by_rule" || task.status === "cancelled" ? "red" : task.status === "awaiting_approval" ? "amber" : "green"}>{statusLabel[task.status]}</StatusChip></div>
             <div style={{ color: "var(--muted)", marginTop: 8, fontSize: 12 }}>Крок: {task.current_step ?? "—"}{task.blocker ? ` · ${task.blocker}` : ""}</div>
             <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
               {task.status === "planning" && <button type="button" className="wideAction" disabled={busy === task.id} onClick={() => void markReady(task)}>Позначити Ready</button>}

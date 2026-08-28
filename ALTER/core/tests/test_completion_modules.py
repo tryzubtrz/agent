@@ -185,4 +185,7 @@ def test_botpress_workflows_separate_deploy_and_runtime_credentials():
     assert "os.environ['BOTPRESS_RUNTIME_TOKEN']" in seal
     assert "except urllib.error.HTTPError as exc" in seal
     assert "recoverable =" in seal
+    assert "class NoRedirectHandler" in seal
+    assert "opener.open(request" in seal
+    assert "urllib.request.urlopen(request" not in seal
     assert "Bot Access Key" in readme

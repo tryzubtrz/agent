@@ -26,13 +26,14 @@ from .api import (
 )
 from .auth import Principal, require_owner
 from .models import ActionRequest, ActionRisk, TaskStatus
+from .orchestrator import ApprovalMismatchError
 from .secret_safety import contains_high_confidence_secret, redact_secrets
 
 router = APIRouter()
 
 
 class TaskControlBody(BaseModel):
-    action: Literal["pause", "resume", "retry", "cancel"]
+    action: Literal["pause", "resume", "retry", "cancel", "authentication_complete"]
     reason: str | None = Field(default=None, max_length=1000)
 
 
@@ -96,21 +97,34 @@ class ResearchUrlBody(BaseModel):
     url: str = Field(min_length=8, max_length=2000)
 
 
-def _memory_list(principal: Principal, namespace: str | None = None, limit: int = 250) -> list[dict[str, Any]]:
+def _memory_list(
+    principal: Principal,
+    namespace: str | None = None,
+    limit: int = 250,
+    *,
+    key: str | None = None,
+    key_prefix: str | None = None,
+) -> list[dict[str, Any]]:
     if memory_store is not None:
         return memory_store.list_for_user(
             workspace_id=principal.workspace_id,
             user_id=principal.user_id,
             namespace=namespace,
+            key=key,
+            key_prefix=key_prefix,
             limit=limit,
         )
     result: list[dict[str, Any]] = []
-    for (workspace_id, user_id, item_namespace, key), value in _memory_fallback.items():
+    for (workspace_id, user_id, item_namespace, item_key), value in _memory_fallback.items():
         if workspace_id != principal.workspace_id or user_id != principal.user_id:
             continue
         if namespace is not None and item_namespace != namespace:
             continue
-        result.append({"namespace": item_namespace, "key": key, "value": value})
+        if key is not None and item_key != key:
+            continue
+        if key_prefix is not None and not item_key.startswith(key_prefix):
+            continue
+        result.append({"namespace": item_namespace, "key": item_key, "value": value})
     return result[:limit]
 
 
@@ -184,21 +198,24 @@ def task_inspector(task_id: UUID, principal: Principal = Depends(require_owner))
     task = _get_owned_task(task_id, principal)
     events: list[dict[str, Any]] = []
     if audit_store is not None:
-        events = [
-            event for event in audit_store.list_for_workspace(principal.workspace_id, limit=250)
-            if str(event.get("task_id") or "") == str(task_id)
-        ]
-    meta_rows = _memory_list(principal, "task.meta", 250)
-    meta = next((row.get("value") for row in meta_rows if row.get("key") == str(task_id)), {})
-    plan_rows = _memory_list(principal, "task.plan", 250)
-    plan = next((row.get("value") for row in plan_rows if row.get("key") == str(task_id)), None)
-    result_rows = _memory_list(principal, "task.result", 250)
-    result = next((row.get("value") for row in result_rows if row.get("key") == str(task_id)), None)
-    action_result_rows = _memory_list(principal, "task.action_result", 250)
+        events = audit_store.list_for_task(principal.workspace_id, task_id, limit=250)
+    task_key = str(task_id)
+    meta_rows = _memory_list(principal, "task.meta", 1, key=task_key)
+    meta = next((row.get("value") for row in meta_rows), {})
+    plan_rows = _memory_list(principal, "task.plan", 1, key=task_key)
+    plan = next((row.get("value") for row in plan_rows), None)
+    result_rows = _memory_list(principal, "task.result", 1, key=task_key)
+    result = next((row.get("value") for row in result_rows), None)
+    action_result_rows = _memory_list(
+        principal,
+        "task.action_result",
+        250,
+        key_prefix=f"{task_id}:",
+    )
     action_results = [
         row.get("value")
         for row in action_result_rows
-        if str(row.get("key", "")).startswith(f"{task_id}:") and isinstance(row.get("value"), dict)
+        if isinstance(row.get("value"), dict)
     ]
     return {
         "task": task.model_dump(mode="json"),
@@ -223,6 +240,24 @@ def task_meta(task_id: UUID, body: TaskMetaBody, principal: Principal = Depends(
 @router.post("/api/tasks/{task_id}/control")
 def task_control(task_id: UUID, body: TaskControlBody, principal: Principal = Depends(require_owner)) -> dict[str, Any]:
     task = _get_owned_task(task_id, principal)
+    if body.action == "authentication_complete":
+        if principal.actor_role != "owner":
+            raise HTTPException(status_code=403, detail="Only Owner can confirm completion of human authentication.")
+        try:
+            saved = orchestrator.resume_after_human_auth(
+                task_id=task_id,
+                workspace_id=principal.workspace_id,
+                owner_rules=policy_store.list_for_workspace(principal.workspace_id),
+            )
+        except ApprovalMismatchError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _audit(
+            principal,
+            event_type="task.authentication_completed",
+            task_id=saved.id,
+            payload={"resulting_status": saved.status.value},
+        )
+        return saved.model_dump(mode="json")
     if body.action == "pause":
         if task.status not in {TaskStatus.READY, TaskStatus.EXECUTING, TaskStatus.RECOVERING}:
             raise HTTPException(status_code=409, detail=f"Task cannot be paused from {task.status.value}.")
@@ -242,13 +277,15 @@ def task_control(task_id: UUID, body: TaskControlBody, principal: Principal = De
         task.blocker = body.reason
         task.current_step = "retry_preflight"
         task.pending_action = None
-    else:
+    elif body.action == "cancel":
         if task.status == TaskStatus.DONE:
             raise HTTPException(status_code=409, detail="Completed task cannot be cancelled.")
         task.status = TaskStatus.CANCELLED
         task.blocker = body.reason or "Cancelled by owner."
         task.current_step = "cancelled"
         task.pending_action = None
+    else:
+        raise HTTPException(status_code=422, detail="Unsupported task control action.")
     saved = orchestrator.store.save(task)
     _audit(principal, event_type=f"task.{body.action}", task_id=task.id, payload={"reason": body.reason})
     return saved.model_dump(mode="json")
