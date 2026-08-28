@@ -1,0 +1,67 @@
+name: ALTER Sanitized Source Export
+
+on:
+  push:
+    paths:
+      - '.github/workflows/alter-source-export.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build sanitized source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p export/ALTER export/.github
+          rsync -a ALTER/ export/ALTER/ \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='bootstrap_vault.json' \
+            --exclude='*.pem' \
+            --exclude='*.key' \
+            --exclude='*.p12' \
+            --exclude='*.pfx' \
+            --exclude='node_modules/' \
+            --exclude='.next/' \
+            --exclude='dist/' \
+            --exclude='build/' \
+            --exclude='__pycache__/' \
+            --exclude='.pytest_cache/' \
+            --exclude='.deploy-trigger*' \
+            --exclude='.vercel-trigger' \
+            --exclude='.vercel-force-deploy'
+          rsync -a .github/workflows/ export/.github/workflows/ \
+            --exclude='alter-source-export.yml'
+          cat > export/README_FOR_REPLIT.md <<'EOF'
+          # ALTER — sanitized source export
+
+          This archive contains the ALTER source code for external review/editing.
+
+          Important rules for the external agent:
+          - Do not invent credentials or replace secure boundaries with mocks.
+          - Do not remove authentication, approval, Vault, audit, RBAC, or secret-safety protections.
+          - Do not claim a feature works unless it is tested.
+          - Keep Botpress as a subordinate reasoning specialist with no direct external side effects.
+          - Preserve the Core policy/approval boundary.
+          - Do not add Android, PC/browser control, Telegram, Gmail, or TikTok unless explicitly requested.
+          - Return all edits as source code only; never add secrets to the repository.
+
+          Runtime secrets are intentionally excluded. Production configuration remains in secure runtime/Vault systems.
+          EOF
+          (cd export && zip -qr ../ALTER-source-sanitized.zip .)
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALTER-source-sanitized
+          path: ALTER-source-sanitized.zip
+          if-no-files-found: error
+          retention-days: 7
