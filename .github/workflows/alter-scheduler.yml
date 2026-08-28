@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/alter-scheduler.yml'
+      - 'ALTER/core/scheduler.request'
 
 permissions:
   contents: read
@@ -16,7 +22,7 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Get short-lived GitHub OIDC token
         id: oidc
@@ -29,6 +35,7 @@ jobs:
 
       - name: Run due ALTER automations
         run: |
+          set -euo pipefail
           TOKEN="$(cat /tmp/alter-oidc)"
           HTTP_CODE="$(curl --silent --show-error --output /tmp/alter-scheduler-response --write-out '%{http_code}' \
             --request POST \
@@ -41,3 +48,32 @@ jobs:
             echo "ALTER scheduler returned HTTP $HTTP_CODE"
             exit 1
           fi
+
+      - name: Run production Core-Vault-Botpress smoke
+        if: github.event_name != 'schedule'
+        run: |
+          set -euo pipefail
+          TOKEN="$(cat /tmp/alter-oidc)"
+          URL='https://alter-app-three.vercel.app/api/scheduler/smoke'
+          for attempt in $(seq 1 12); do
+            HTTP_CODE="$(curl --silent --show-error --output /tmp/alter-smoke-response --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer ${TOKEN}" \
+              --header 'Accept: application/json' \
+              "$URL")"
+            cat /tmp/alter-smoke-response
+            echo
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              echo 'ALTER production smoke passed.'
+              exit 0
+            fi
+            if [ "$HTTP_CODE" = '404' ] || [ "$HTTP_CODE" = '408' ] || [ "$HTTP_CODE" = '425' ] || [ "$HTTP_CODE" = '429' ] || [ "$HTTP_CODE" -ge 500 ]; then
+              echo "ALTER smoke endpoint not ready (HTTP $HTTP_CODE, attempt $attempt/12)."
+              sleep 10
+              continue
+            fi
+            echo "ALTER production smoke failed with non-retryable HTTP $HTTP_CODE"
+            exit 1
+          done
+          echo 'ALTER production smoke did not become healthy in time.'
+          exit 1
