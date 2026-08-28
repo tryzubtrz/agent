@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from .api import (
     _audit,
+    _commit_approval_decision,
     _commit_task_transition_with_record,
     orchestrator,
     policy_store,
@@ -15,7 +16,12 @@ from .api import (
 from .auth import Principal, require_owner
 from .connector_gateway_api import test_connector
 from .models import ActionRisk, PolicyEffect, Task, TaskStatus
-from .orchestrator import ApprovalMismatchError, InvalidTaskTransitionError, TaskNotFoundError
+from .orchestrator import (
+    ApprovalMismatchError,
+    InvalidTaskTransitionError,
+    PolicyDeniedApprovalError,
+    TaskNotFoundError,
+)
 from .secret_safety import contains_high_confidence_secret
 
 router = APIRouter()
@@ -86,15 +92,15 @@ def _policy_preflight(
     task_id: UUID,
     principal: Principal,
     expected_digest: str,
-    approval_digest: str | None,
-) -> Task:
+    approval_satisfied: bool,
+) -> tuple[Task, PolicyEffect, str]:
     """Lock task + latest policy snapshot immediately before read-only execution.
 
     The first executor intentionally supports read-only provider calls only. This
     preflight therefore does not hold a database transaction open across a network
     request. Future write executors require an execution lease/idempotency key.
     """
-    outcome: dict[str, str | None] = {}
+    outcome: dict[str, Any] = {}
 
     def transition(candidate: Task, current_rules) -> Task:
         if candidate.workspace_id != principal.workspace_id or candidate.owner_user_id != principal.user_id:
@@ -108,11 +114,9 @@ def _policy_preflight(
         current_digest = candidate.pending_action.digest()
         if current_digest != expected_digest:
             raise ApprovalMismatchError("Active action changed before executor preflight.")
-        if approval_digest is not None and approval_digest != current_digest:
-            raise ApprovalMismatchError("Execution approval does not match the active action.")
 
         decision = orchestrator.policy_engine.evaluate(candidate.pending_action, current_rules)
-        outcome["effect"] = decision.effect.value
+        outcome["effect"] = decision.effect
         outcome["reason"] = decision.reason
         outcome["matched_rule_id"] = str(decision.matched_rule_id) if decision.matched_rule_id else None
 
@@ -123,7 +127,7 @@ def _policy_preflight(
             candidate.pending_action = None
             return candidate
 
-        if decision.effect == PolicyEffect.REQUIRE_APPROVAL and approval_digest != current_digest:
+        if decision.effect == PolicyEffect.REQUIRE_APPROVAL and not approval_satisfied:
             candidate.status = TaskStatus.AWAITING_APPROVAL
             candidate.current_step = "approval_before_executor"
             candidate.blocker = decision.reason
@@ -147,48 +151,48 @@ def _policy_preflight(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     effect = outcome.get("effect")
+    if not isinstance(effect, PolicyEffect):
+        raise HTTPException(status_code=500, detail="Executor policy preflight produced no decision")
     reason = str(outcome.get("reason") or "Policy preflight failed")
-    audit_payload = {
-        "effect": effect,
-        "reason": reason,
-        "action_digest": expected_digest,
-        "matched_rule_id": outcome.get("matched_rule_id"),
-        "approval_digest_supplied": approval_digest == expected_digest,
-    }
+    event_type = "executor.policy_preflight_allowed"
+    if effect == PolicyEffect.DENY:
+        event_type = "executor.policy_recheck_blocked"
+    elif effect == PolicyEffect.REQUIRE_APPROVAL and not approval_satisfied:
+        event_type = "executor.approval_required"
+    _audit(
+        principal,
+        event_type=event_type,
+        task_id=updated.id,
+        payload={
+            "effect": effect.value,
+            "reason": reason,
+            "action_digest": expected_digest,
+            "matched_rule_id": outcome.get("matched_rule_id"),
+            "approval_satisfied": approval_satisfied,
+        },
+    )
+    return updated, effect, reason
 
-    if effect == PolicyEffect.DENY.value:
-        _audit(
-            principal,
-            event_type="executor.policy_recheck_blocked",
-            task_id=updated.id,
-            payload=audit_payload,
-        )
-        raise HTTPException(status_code=409, detail=f"Current policy denies execution: {reason}")
 
-    if effect == PolicyEffect.REQUIRE_APPROVAL.value and approval_digest != expected_digest:
-        _audit(
-            principal,
-            event_type="executor.approval_required",
-            task_id=updated.id,
-            payload=audit_payload,
+def _record_required_approval(
+    *,
+    task_id: UUID,
+    principal: Principal,
+    action_digest: str,
+) -> Task:
+    try:
+        approved, _approval = _commit_approval_decision(
+            task_id=task_id,
+            principal=principal,
+            action_digest=action_digest,
+            approved=True,
+            source="runtime_executor",
         )
-        raise HTTPException(status_code=409, detail=f"Current policy requires approval: {reason}")
-
-    if effect == PolicyEffect.REQUIRE_APPROVAL.value:
-        _audit(
-            principal,
-            event_type="executor.inline_approval",
-            task_id=updated.id,
-            payload=audit_payload,
-        )
-    else:
-        _audit(
-            principal,
-            event_type="executor.policy_preflight_allowed",
-            task_id=updated.id,
-            payload=audit_payload,
-        )
-    return updated
+    except PolicyDeniedApprovalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ApprovalMismatchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return approved
 
 
 def _run_connector_self_test(connector: ReadOnlyConnector, principal: Principal) -> dict[str, Any]:
@@ -277,12 +281,39 @@ def execute_pending_action(
     current = _owned_task(task_id, principal)
     connector, action_digest, _attempt_id = _validate_supported_action(current)
     approval_digest = body.approval_digest if body is not None else None
-    prepared = _policy_preflight(
+    if approval_digest is not None and approval_digest != action_digest:
+        raise HTTPException(status_code=409, detail="Execution approval does not match the active action.")
+
+    prepared, effect, reason = _policy_preflight(
         task_id=task_id,
         principal=principal,
         expected_digest=action_digest,
-        approval_digest=approval_digest,
+        approval_satisfied=False,
     )
+    approval_recorded = False
+
+    if effect == PolicyEffect.DENY:
+        raise HTTPException(status_code=409, detail=f"Current policy denies execution: {reason}")
+
+    if effect == PolicyEffect.REQUIRE_APPROVAL:
+        if approval_digest != action_digest:
+            raise HTTPException(status_code=409, detail=f"Current policy requires approval: {reason}")
+        prepared = _record_required_approval(
+            task_id=task_id,
+            principal=principal,
+            action_digest=action_digest,
+        )
+        approval_recorded = True
+        # A second lock/snapshot closes the gap between approval and provider call.
+        prepared, effect, reason = _policy_preflight(
+            task_id=task_id,
+            principal=principal,
+            expected_digest=action_digest,
+            approval_satisfied=True,
+        )
+        if effect == PolicyEffect.DENY:
+            raise HTTPException(status_code=409, detail=f"Current policy denies execution: {reason}")
+
     connector, action_digest, attempt_id = _validate_supported_action(prepared)
 
     try:
@@ -295,6 +326,8 @@ def execute_pending_action(
             "provider_result_ok=true",
             "secret_exposed=false",
         ]
+        if approval_recorded:
+            evidence.append("policy_approval_recorded=true")
         updated, record = _persist_executor_result(
             task=prepared,
             principal=principal,
@@ -316,6 +349,8 @@ def execute_pending_action(
             f"provider_error_status={exc.status_code}",
             "secret_exposed=false",
         ]
+        if approval_recorded:
+            evidence.append("policy_approval_recorded=true")
         updated, record = _persist_executor_result(
             task=prepared,
             principal=principal,
