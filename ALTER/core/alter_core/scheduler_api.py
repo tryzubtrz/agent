@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import time
 from typing import Any
@@ -13,7 +14,10 @@ from fastapi import APIRouter, Header, HTTPException
 
 from .auth import system_principal
 from .automation_tick_api import tick_automations
-from .botpress_gateway import BotpressGateway
+from .botpress_contract import BotpressContractError, validate_specialist_output
+from .botpress_gateway import BotpressGateway, BotpressRuntimeError, BotpressUnavailableError
+from .connector_gateway_api import capture_posthog_system_event
+from .rag_engine import retrieve_rows
 
 router = APIRouter()
 
@@ -94,14 +98,28 @@ def _verify_oidc(token: str) -> dict[str, Any]:
     return claims
 
 
-@router.post("/api/scheduler/tick")
-def github_scheduler_tick(authorization: str | None = Header(default=None, alias="Authorization")) -> dict[str, Any]:
+def _claims_from_authorization(authorization: str | None) -> dict[str, Any]:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="GitHub OIDC bearer token required")
-    claims = _verify_oidc(authorization.removeprefix("Bearer ").strip())
+    return _verify_oidc(authorization.removeprefix("Bearer ").strip())
+
+
+@router.post("/api/scheduler/tick")
+def github_scheduler_tick(authorization: str | None = Header(default=None, alias="Authorization")) -> dict[str, Any]:
+    claims = _claims_from_authorization(authorization)
     principal = system_principal("github-actions-scheduler")
     result = tick_automations(principal)
     agent_status = BotpressGateway().status()
+    telemetry_state = "accepted"
+    try:
+        capture_posthog_system_event(
+            "alter_system_check",
+            {"source": "scheduler_tick", "storage": "postgres", "agent_configured": agent_status.configured},
+            distinct_id="alter-scheduler",
+            surface="core",
+        )
+    except HTTPException:
+        telemetry_state = "degraded"
     return {
         **result,
         "scheduler": "github-actions-oidc",
@@ -110,5 +128,69 @@ def github_scheduler_tick(authorization: str | None = Header(default=None, alias
         "static_scheduler_secret": False,
         "agent_configured": agent_status.configured,
         "agent_action": agent_status.action,
+        "telemetry": telemetry_state,
+        "secret_exposed": False,
+    }
+
+
+@router.post("/api/scheduler/smoke")
+def github_production_smoke(authorization: str | None = Header(default=None, alias="Authorization")) -> dict[str, Any]:
+    claims = _claims_from_authorization(authorization)
+
+    synthetic_rows = [
+        {"namespace": "documents", "key": "smoke-doc", "value": {"text": "ALTER smoke knowledge phrase cobalt orchard"}},
+        {"namespace": "vault_secure", "key": "smoke-secret", "value": {"text": "cobalt orchard must never leak from vault"}},
+    ]
+    rag_hits = retrieve_rows(synthetic_rows, "cobalt orchard", limit=5)
+    rag_ok = bool(rag_hits) and any(item.get("key") == "smoke-doc" for item in rag_hits) and all(
+        item.get("namespace") != "vault_secure" for item in rag_hits
+    )
+    if not rag_ok:
+        raise HTTPException(status_code=500, detail="Secret-safe RAG smoke failed")
+
+    gateway = BotpressGateway()
+    status = gateway.status()
+    if not status.configured:
+        raise HTTPException(status_code=503, detail="Botpress runtime credential is not configured in ALTER Vault")
+    try:
+        output = gateway.think(
+            objective="Reply with a brief confirmation that ALTER specialist reasoning is online. Do not perform or claim any side effect.",
+            context="Production smoke from GitHub OIDC through ALTER Core and Vault.",
+            mode="quick",
+        )
+        response = validate_specialist_output(output)
+    except BotpressUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="Botpress specialist is unavailable") from exc
+    except (BotpressRuntimeError, BotpressContractError) as exc:
+        raise HTTPException(status_code=502, detail="Botpress specialist production smoke failed") from exc
+
+    telemetry = capture_posthog_system_event(
+        "alter_system_check",
+        {
+            "source": "production_smoke",
+            "botpress_ok": True,
+            "rag_ok": True,
+            "secret_exposed": False,
+        },
+        distinct_id="alter-production-smoke",
+        surface="core",
+    )
+
+    return {
+        "ok": True,
+        "scheduler_oidc": True,
+        "repository": claims.get("repository"),
+        "run_id": claims.get("run_id"),
+        "botpress": {
+            "configured": True,
+            "contract_ok": True,
+            "action": status.action,
+            "boundary": output.get("boundary"),
+            "side_effects_performed": output.get("sideEffectsPerformed"),
+            "response_present": bool(response),
+            "response_sha256": hashlib.sha256(response.encode("utf-8")).hexdigest(),
+        },
+        "rag": {"ok": True, "engine": "secret-safe-rag-v2", "hits": len(rag_hits)},
+        "telemetry": telemetry,
         "secret_exposed": False,
     }
