@@ -81,6 +81,39 @@ def test_agent_think_repairs_internal_reasoning_once(monkeypatch):
     assert "ORIGINAL USER MESSAGE" in gateway.calls[1]["objective"]
 
 
+def test_repair_redacts_full_draft_before_truncation(monkeypatch):
+    captured = {}
+
+    def fake_redact(value: str):
+        captured["input"] = value
+        return "R" * 9_000, True
+
+    class CleanGateway:
+        def __init__(self):
+            self.calls = []
+
+        def think(self, **kwargs):
+            self.calls.append(kwargs)
+            return _output("Готово.")
+
+    gateway = CleanGateway()
+    monkeypatch.setattr(agent_api, "redact_secrets", fake_redact)
+    monkeypatch.setattr(agent_api, "gateway", gateway)
+    draft = "X" * 12_000
+
+    response, redacted = agent_api._repair_internal_chat_output(
+        objective="Тест",
+        draft=draft,
+    )
+
+    assert response == "Готово."
+    assert redacted is True
+    assert captured["input"] == draft
+    repair_context = gateway.calls[0]["context"]
+    assert repair_context.endswith("R" * 8_000)
+    assert "R" * 8_001 not in repair_context
+
+
 def test_agent_think_fails_closed_when_repair_still_leaks(monkeypatch):
     token = _configure_owner(monkeypatch)
 
