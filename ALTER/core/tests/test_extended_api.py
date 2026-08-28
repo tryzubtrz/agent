@@ -1,11 +1,10 @@
 from types import SimpleNamespace
 from uuid import uuid4
 
-from fastapi.testclient import TestClient
-
-from api.index import app
 from alter_core import conversation_api
 from alter_core.botpress_gateway import BotpressGateway
+from api.index import app
+from fastapi.testclient import TestClient
 
 
 def configure_owner(monkeypatch):
@@ -64,6 +63,38 @@ def test_redactor_covers_database_urls_jwts_and_private_keys():
     assert "[REDACTED]" in safe
     assert "[REDACTED_JWT]" in safe
     assert "[REDACTED_PRIVATE_KEY]" in safe
+
+
+def test_redactor_covers_basic_authorization_credentials():
+    credential = "dXNlcjpwYXNzd29yZA=="
+    safe, changed = conversation_api._redact(f"Authorization: Basic {credential}")
+    assert changed is True
+    assert credential not in safe
+    assert safe == "Authorization=[REDACTED]"
+
+
+def test_redactor_preserves_vault_aliases_in_authorization_headers():
+    for source in (
+        "Authorization: Basic vault:botpress_runtime",
+        "Authorization: Bearer vault:github_connector",
+    ):
+        safe, changed = conversation_api._redact(source)
+        assert changed is False
+        assert safe == source
+
+
+def test_redactor_covers_json_authorization_and_preserves_vault_reference():
+    credential = "dXNlcjpwYXNzd29yZA=="
+    source = f'{{"Authorization":"Basic {credential}"}}'
+    safe, changed = conversation_api._redact(source)
+    assert changed is True
+    assert credential not in safe
+    assert safe == '{"Authorization":"[REDACTED]"}'
+
+    vault_source = '{"Authorization":"Basic vault:botpress_runtime"}'
+    vault_safe, vault_changed = conversation_api._redact(vault_source)
+    assert vault_changed is False
+    assert vault_safe == vault_source
 
 
 def test_conversation_ai_is_fail_closed_without_runtime_credential(monkeypatch):
@@ -129,6 +160,30 @@ def test_conversation_rejects_wrong_specialist_boundary(monkeypatch):
     )
     assert response.status_code == 502
     assert "boundary" in response.json()["detail"].lower()
+
+
+def test_conversation_rejects_oversized_specialist_response(monkeypatch):
+    token = configure_owner(monkeypatch)
+
+    class OversizedGateway:
+        def status(self):
+            return SimpleNamespace(configured=True)
+
+        def think(self, **_kwargs):
+            return {
+                "response": "x" * 50_001,
+                "sideEffectsPerformed": False,
+                "boundary": "core-policy-required",
+            }
+
+    monkeypatch.setattr(conversation_api, "gateway", OversizedGateway())
+    response = TestClient(app).post(
+        "/api/conversation/respond",
+        headers=auth(token),
+        json={"text": "Тест", "mode": "normal"},
+    )
+    assert response.status_code == 502
+    assert "oversized" in response.json()["detail"].lower()
 
 
 def test_system_status_is_truthful_and_secret_safe(monkeypatch):

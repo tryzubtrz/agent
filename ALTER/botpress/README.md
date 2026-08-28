@@ -17,13 +17,17 @@ GitHub Actions acts as the temporary cloud computer. The workflow installs the B
 1. In Botpress, open Profile Settings and create a Personal Access Token (PAT).
 2. Copy it once. Never paste it into chat, source code, an issue, a commit, or `deploy.request`.
 3. In GitHub open `tryzubtrz/agent` → Settings → Secrets and variables → Actions → New repository secret.
-4. Name the secret exactly `BOTPRESS_PAT` and paste the PAT as its value.
-5. Tell ChatGPT only that the secret has been added. Do not send the token itself.
-6. ChatGPT can then update `ALTER/botpress/deploy.request`; that push triggers the cloud deployment workflow.
+4. Name the secret exactly `BOTPRESS_PAT` and paste the PAT as its value. This credential is used only by the ADK deployment steps.
+5. Obtain the deployed bot's least-privileged Bot Access Key (BAK), which Botpress limits to Runtime, Tables, and Files APIs.
+6. Add the BAK as a second GitHub Actions secret named exactly `BOTPRESS_RUNTIME_TOKEN`.
+7. Tell ChatGPT only that both secrets have been added. Do not send either token itself.
+8. ChatGPT can then update `ALTER/botpress/deploy.request`; that push triggers the cloud deployment workflow.
 
 ## Security
 
-A Botpress PAT has account-level access. It lives only in GitHub Actions Secrets and is provided to the runner at deployment time. The repository contains only the non-secret workspace and bot identifiers.
+A Botpress PAT has account-level access. It lives only in GitHub Actions Secrets, is provided solely to the ADK deployment steps, and must never be used by ALTER Runtime. The repository contains only the non-secret workspace and bot identifiers.
+
+Runtime contract checks and ALTER Core use the separate `BOTPRESS_RUNTIME_TOKEN` Bot Access Key. GitHub Actions seals that BAK into `vault:botpress_runtime`; production Core resolves only the Vault alias. Explicit constructor tokens and environment fallback are limited to local/test execution.
 
 ## Current scope
 

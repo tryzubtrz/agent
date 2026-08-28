@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -9,6 +10,48 @@ from psycopg.types.json import Jsonb
 
 from .models import Approval, PolicyRule, Task
 from .orchestrator import TaskNotFoundError
+
+
+def _lock_task(conn: Any, task_id: UUID) -> Task:
+    row = conn.execute(
+        """
+        SELECT id, workspace_id, owner_user_id, objective, status,
+               acceptance_criteria, current_step, blocker, pending_action,
+               created_at, updated_at
+        FROM tasks
+        WHERE id = %s
+        FOR UPDATE
+        """,
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        raise TaskNotFoundError(str(task_id))
+    return Task.model_validate(row)
+
+
+def _write_task(conn: Any, task: Task) -> None:
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = %s,
+            current_step = %s,
+            blocker = %s,
+            pending_action = %s,
+            updated_at = %s
+        WHERE id = %s AND workspace_id = %s
+        """,
+        (
+            task.status.value,
+            task.current_step,
+            task.blocker,
+            Jsonb(task.pending_action.model_dump(mode="json"))
+            if task.pending_action is not None
+            else None,
+            task.updated_at,
+            task.id,
+            task.workspace_id,
+        ),
+    )
 
 
 class PostgresTaskStore:
@@ -69,6 +112,46 @@ class PostgresTaskStore:
             raise TaskNotFoundError(str(task_id))
         return Task.model_validate(row)
 
+    def transition(
+        self,
+        task_id: UUID,
+        transition: Callable[[Task], Task],
+    ) -> Task:
+        """Apply a transition to the latest row while holding a database lock."""
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            task = transition(_lock_task(conn, task_id))
+            task.touch()
+            _write_task(conn, task)
+        return task
+
+    def transition_with_policy_rules(
+        self,
+        *,
+        task_id: UUID,
+        user_id: UUID,
+        transition: Callable[[Task, list[PolicyRule]], Task],
+    ) -> Task:
+        """Lock the task, then load and apply the latest policies in one transaction."""
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            current = _lock_task(conn, task_id)
+            if current.owner_user_id != user_id:
+                raise PermissionError("Cross-owner task transition denied.")
+            policy_rows = conn.execute(
+                """
+                SELECT id, workspace_id, original_text, category, effect,
+                       enabled, priority, created_at
+                FROM policy_rules
+                WHERE workspace_id = %s
+                ORDER BY priority ASC, created_at ASC
+                """,
+                (current.workspace_id,),
+            ).fetchall()
+            rules = [PolicyRule.model_validate(policy_row) for policy_row in policy_rows]
+            task = transition(current, rules)
+            task.touch()
+            _write_task(conn, task)
+        return task
+
     def list_for_owner(
         self,
         workspace_id: UUID,
@@ -90,6 +173,35 @@ class PostgresTaskStore:
                 (workspace_id, owner_user_id, limit),
             ).fetchall()
         return [Task.model_validate(row) for row in rows]
+
+    def transition_with_memory(
+        self,
+        *,
+        task_id: UUID,
+        user_id: UUID,
+        namespace: str,
+        key: str,
+        value: Any,
+        transition: Callable[[Task], Task],
+    ) -> Task:
+        """Commit a task transition and its evidence record atomically."""
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            current = _lock_task(conn, task_id)
+            if current.owner_user_id != user_id:
+                raise PermissionError("Cross-owner task transition denied.")
+            task = transition(current)
+            task.touch()
+            _write_task(conn, task)
+            conn.execute(
+                """
+                INSERT INTO memories (workspace_id, user_id, namespace, key, value)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (workspace_id, user_id, namespace, key)
+                DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+                """,
+                (task.workspace_id, user_id, namespace, key, Jsonb(value)),
+            )
+        return task
 
 
 class PostgresPolicyStore:
@@ -222,6 +334,27 @@ class PostgresAuditStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_for_task(
+        self,
+        workspace_id: UUID,
+        task_id: UUID,
+        *,
+        limit: int = 250,
+    ) -> list[dict[str, Any]]:
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_id, task_id, actor_type, actor_id,
+                       event_type, payload, created_at
+                FROM audit_events
+                WHERE workspace_id = %s AND task_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (workspace_id, task_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
 
 class PostgresMemoryStore:
     def __init__(self, dsn: str) -> None:
@@ -258,8 +391,13 @@ class PostgresMemoryStore:
         workspace_id: UUID,
         user_id: UUID,
         namespace: str | None = None,
+        key: str | None = None,
+        key_prefix: str | None = None,
+        exclude_protected: bool = False,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
+        if key is not None and key_prefix is not None:
+            raise ValueError("Memory queries cannot combine key and key_prefix.")
         query = """
             SELECT id, workspace_id, user_id, namespace, key, value,
                    created_at, updated_at
@@ -270,6 +408,19 @@ class PostgresMemoryStore:
         if namespace:
             query += " AND namespace = %s"
             params.append(namespace)
+        if exclude_protected:
+            query += """
+                AND NOT (
+                    left(lower(btrim(namespace)), 6) = '_vault'
+                    OR left(lower(btrim(namespace)), 12) = 'vault_secure'
+                )
+            """
+        if key is not None:
+            query += " AND key = %s"
+            params.append(key)
+        elif key_prefix is not None:
+            query += " AND left(key, char_length(%s)) = %s"
+            params.extend((key_prefix, key_prefix))
         query += " ORDER BY updated_at DESC LIMIT %s"
         params.append(limit)
         with connect(self.dsn, row_factory=dict_row) as conn:

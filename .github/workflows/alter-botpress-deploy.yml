@@ -28,18 +28,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check Botpress secret
+      - name: Check Botpress credentials
         id: auth
         env:
           BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+          BOTPRESS_RUNTIME_TOKEN: ${{ secrets.BOTPRESS_RUNTIME_TOKEN }}
         run: |
           if [ -z "$BOTPRESS_PAT" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "BOTPRESS_PAT is not configured yet; deployment cannot continue."
             exit 3
-          else
-            echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
+          if [ -z "$BOTPRESS_RUNTIME_TOKEN" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "BOTPRESS_RUNTIME_TOKEN (Bot Access Key) is not configured; contract verification cannot continue."
+            exit 3
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -65,7 +70,13 @@ jobs:
         working-directory: ALTER/botpress
         run: npx adk link --workspace "$BOTPRESS_WORKSPACE_ID" --bot "$BOTPRESS_BOT_ID" --force
 
-      - name: Validate before deploy
+      - name: Type-check before deploy
+        working-directory: ALTER/botpress
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: npx tsc --noEmit
+
+      - name: Validate ADK structure before deploy
         working-directory: ALTER/botpress
         run: npx adk check
 
@@ -73,18 +84,32 @@ jobs:
         working-directory: ALTER/botpress
         run: npx adk deploy --yes --allow-unconfigured
 
-      - name: Smoke test Botpress Runtime API
+      - name: Verify deployed alterThink contract
+        id: contract
         env:
-          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+          BOTPRESS_RUNTIME_TOKEN: ${{ secrets.BOTPRESS_RUNTIME_TOKEN }}
         run: |
           set -euo pipefail
+          cat >/tmp/alter-think-request.json <<'JSON'
+          {
+            "type": "alterThink",
+            "input": {
+              "objective": "Return a brief confirmation that ALTER specialist reasoning is online. Do not claim any side effect.",
+              "context": "Post-deployment contract verification from GitHub Actions.",
+              "mode": "quick"
+            }
+          }
+          JSON
           HTTP_STATUS=$(curl -sS -o /tmp/botpress-runtime.json -w '%{http_code}' \
-            -H "Authorization: Bearer $BOTPRESS_PAT" \
+            --request POST \
+            -H "Authorization: Bearer $BOTPRESS_RUNTIME_TOKEN" \
             -H "x-bot-id: $BOTPRESS_BOT_ID" \
             -H "Accept: application/json" \
-            "https://api.botpress.cloud/v1/chat/conversations?sortField=updatedAt&sortDirection=desc")
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/alter-think-request.json \
+            "https://api.botpress.cloud/v1/chat/actions")
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "Botpress Runtime API smoke test failed with HTTP $HTTP_STATUS"
+            echo "Botpress alterThink contract verification failed with HTTP $HTTP_STATUS"
             python - <<'PY'
           from pathlib import Path
           text = Path('/tmp/botpress-runtime.json').read_text(errors='replace')
@@ -96,8 +121,17 @@ jobs:
           import json
           from pathlib import Path
           payload = json.loads(Path('/tmp/botpress-runtime.json').read_text())
-          conversations = payload.get('conversations', [])
-          print(f"Botpress Runtime API reachable; conversations returned: {len(conversations)}")
+          output = payload.get('output')
+          if not isinstance(output, dict):
+              raise SystemExit('Botpress response did not contain an output object.')
+          response = output.get('response')
+          if not isinstance(response, str) or not response.strip():
+              raise SystemExit('Botpress alterThink returned no usable response.')
+          if output.get('sideEffectsPerformed') is not False:
+              raise SystemExit('Botpress alterThink violated the no-side-effect contract.')
+          if output.get('boundary') != 'core-policy-required':
+              raise SystemExit('Botpress alterThink returned an invalid Core policy boundary.')
+          print('Botpress alterThink contract verified: usable response, no side effects, Core policy boundary intact.')
           PY
 
       - name: Report deploy result
@@ -107,16 +141,23 @@ jobs:
           REPO: ${{ github.repository }}
           JOB_STATUS: ${{ job.status }}
           AUTH_OUTCOME: ${{ steps.auth.outcome }}
+          CONTRACT_OUTCOME: ${{ steps.contract.outcome }}
         run: |
           BODY=$(python - <<'PY'
           import json, os
+          contract_outcome = os.environ.get('CONTRACT_OUTCOME') or 'not-run'
+          contract_report = (
+              'The deployed alterThink action contract was verified after deployment.'
+              if contract_outcome == 'success'
+              else f'The alterThink contract was not verified (step outcome: {contract_outcome}).'
+          )
           body = (
               'Cloud deployment report. No secret values are included.\n\n'
               f"Job status: {os.environ.get('JOB_STATUS')}\n"
               f"Secret check step: {os.environ.get('AUTH_OUTCOME')}\n"
               'Target workspace: wkspace_01M0XTFXYMFEDGHEEKT710G22P\n'
               'Target bot: 64f3490a-183a-47c5-b825-97210771822f\n'
-              'Runtime API smoke test is part of this deploy job.\n'
+              f'{contract_report}\n'
               'Unconfigured optional dependencies are allowed to remain inert.'
           )
           print(json.dumps(body))

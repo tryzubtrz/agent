@@ -57,6 +57,7 @@ class PolicyRule(BaseModel):
 
 
 class ActionRequest(BaseModel):
+    attempt_id: UUID | None = None
     workspace_id: UUID
     task_id: UUID
     category: str

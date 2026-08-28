@@ -5,7 +5,6 @@ import {
   Bell,
   Bot,
   Brain,
-  CheckCircle2,
   Clock3,
   Database,
   Folder,
@@ -21,11 +20,12 @@ import {
   Smartphone,
   Users,
 } from "lucide-react";
+import Link from "next/link";
 import { type ComponentType, type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 type Screen = "home" | "tasks" | "rules" | "memory" | "audit" | "connectors" | "browser" | "android" | "models" | "vault" | "people" | "files";
 type Icon = ComponentType<{ size?: number; strokeWidth?: number }>;
-type TaskStatus = "intake" | "planning" | "ready" | "executing" | "awaiting_approval" | "awaiting_login" | "awaiting_mfa" | "blocked_by_rule" | "recovering" | "paused" | "done" | "failed";
+type TaskStatus = "intake" | "planning" | "ready" | "executing" | "awaiting_approval" | "awaiting_login" | "awaiting_mfa" | "blocked_by_rule" | "recovering" | "paused" | "done" | "failed" | "cancelled";
 type ChatMode = "chat" | "task";
 
 type Task = {
@@ -115,6 +115,7 @@ const statusLabel: Record<TaskStatus, string> = {
   paused: "Пауза",
   done: "Готово",
   failed: "Помилка",
+  cancelled: "Скасовано",
 };
 
 async function core<T>(path: string, init?: RequestInit): Promise<T> {
@@ -389,11 +390,15 @@ export default function Page() {
 
 function TasksScreen({ tasks, refresh }: { tasks: Task[]; refresh: () => Promise<void> }) {
   const [busy, setBusy] = useState<string | null>(null);
-  async function transition(task: Task, action: "ready" | "complete") {
+  const [error, setError] = useState("");
+  async function markReady(task: Task) {
     setBusy(task.id);
     try {
-      await core<Task>(`/tasks/${task.id}/${action}`, { method: "POST", body: "{}" });
+      await core<Task>(`/tasks/${task.id}/ready`, { method: "POST", body: "{}" });
       await refresh();
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не вдалося оновити задачу");
     } finally { setBusy(null); }
   }
   return (
@@ -403,14 +408,15 @@ function TasksScreen({ tasks, refresh }: { tasks: Task[]; refresh: () => Promise
         {tasks.length === 0 && <p style={{ color: "var(--muted)" }}>Ще немає задач. Створи першу на головному екрані.</p>}
         {tasks.map((task) => (
           <article key={task.id} className="ruleCard" style={{ borderRadius: 16, padding: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><strong>{task.objective}</strong><StatusChip tone={task.status === "failed" || task.status === "blocked_by_rule" ? "red" : task.status === "awaiting_approval" ? "amber" : "green"}>{statusLabel[task.status]}</StatusChip></div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><strong>{task.objective}</strong><StatusChip tone={task.status === "failed" || task.status === "blocked_by_rule" || task.status === "cancelled" ? "red" : task.status === "awaiting_approval" ? "amber" : "green"}>{statusLabel[task.status]}</StatusChip></div>
             <div style={{ color: "var(--muted)", marginTop: 8, fontSize: 12 }}>Крок: {task.current_step ?? "—"}{task.blocker ? ` · ${task.blocker}` : ""}</div>
             <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-              {task.status === "planning" && <button type="button" className="wideAction" disabled={busy === task.id} onClick={() => void transition(task, "ready")}>Позначити Ready</button>}
-              {!["done", "failed"].includes(task.status) && <button type="button" className="wideAction" disabled={busy === task.id} onClick={() => void transition(task, "complete")}><CheckCircle2 size={15} /> Завершити</button>}
+              {task.status === "planning" && <button type="button" className="wideAction" disabled={busy === task.id} onClick={() => void markReady(task)}>Позначити Ready</button>}
+              <Link className="wideAction" href={`/tasks/${task.id}`} style={{ textDecoration: "none" }}>Відкрити Task Inspector</Link>
             </div>
           </article>
         ))}
+        {error && <p style={{ color: "#ffaaa7" }}>{error}</p>}
       </div>
     </section>
   );

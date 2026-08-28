@@ -21,13 +21,35 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"\b(?:bp|bpt|botpress)_[A-Za-z0-9_-]{16,}\b", re.IGNORECASE), "[REDACTED_BOTPRESS_TOKEN]"),
-    (
-        re.compile(
-            r"(?i)\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|auth(?:orization)?|password|passwd|secret|cookie|session[_ -]?token|pat)\s*[:=]\s*([^\s,;]{6,})"
-        ),
-        r"\1=[REDACTED]",
-    ),
 )
+
+_SECRET_LABEL = (
+    r"(?:api|access|refresh|session|client)[_ -]?(?:key|token|secret)"
+    r"|private[_ -]?key|secret(?:[_ -]?(?:key|token))?"
+    r"|auth(?:orization)?|password|passwd|cookie|pat"
+)
+_SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)\b({_SECRET_LABEL})\s*[:=]\s*"
+    rf"((?:(?:basic|bearer|token|apikey)\s+[^\s,;]{{4,}})|[^\s,;]{{6,}})"
+)
+_JSON_SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)([\"'](?:{_SECRET_LABEL})[\"']\s*:\s*[\"'])"
+    rf"((?:(?:basic|bearer|token|apikey)\s+[^\"']{{4,}})|[^\"']{{6,}})"
+    rf"([\"'])"
+)
+_SECRET_FIELD_NAME = re.compile(
+    rf"(?i)^(?:{_SECRET_LABEL})$"
+)
+
+
+def _is_vault_alias(value: str) -> bool:
+    return value.strip().lower().startswith("vault:")
+
+
+def _is_vault_reference(value: str) -> bool:
+    parts = value.strip().split(maxsplit=1)
+    candidate = parts[1] if len(parts) == 2 and parts[0].lower() in {"basic", "bearer", "token", "apikey"} else parts[0]
+    return _is_vault_alias(candidate)
 
 
 def redact_secrets(text: str) -> tuple[str, bool]:
@@ -38,6 +60,24 @@ def redact_secrets(text: str) -> tuple[str, bool]:
         if updated != safe:
             changed = True
             safe = updated
+    updated = _JSON_SECRET_ASSIGNMENT.sub(
+        lambda match: match.group(0)
+        if _is_vault_reference(match.group(2))
+        else f"{match.group(1)}[REDACTED]{match.group(3)}",
+        safe,
+    )
+    if updated != safe:
+        changed = True
+        safe = updated
+    updated = _SECRET_ASSIGNMENT.sub(
+        lambda match: match.group(0)
+        if _is_vault_reference(match.group(2))
+        else f"{match.group(1)}=[REDACTED]",
+        safe,
+    )
+    if updated != safe:
+        changed = True
+        safe = updated
     return safe, changed
 
 
@@ -51,7 +91,20 @@ def contains_high_confidence_secret(value: Any) -> bool:
         _safe, changed = redact_secrets(value)
         return changed
     if isinstance(value, dict):
-        return any(contains_high_confidence_secret(item) for item in value.values())
+        for key, item in value.items():
+            if isinstance(key, str) and contains_high_confidence_secret(key):
+                return True
+            if (
+                isinstance(key, str)
+                and _SECRET_FIELD_NAME.fullmatch(key.strip())
+                and isinstance(item, str)
+                and len(item.strip()) >= 6
+                and not _is_vault_alias(item)
+            ):
+                return True
+            if contains_high_confidence_secret(item):
+                return True
+        return False
     if isinstance(value, (list, tuple)):
         return any(contains_high_confidence_secret(item) for item in value)
     return False

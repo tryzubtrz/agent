@@ -7,8 +7,8 @@ from typing import Any, Literal
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
 from psycopg import connect
+from pydantic import BaseModel, Field
 
 from .api import _audit, _memory_fallback, memory_store
 from .auth import Principal, require_owner
@@ -100,7 +100,7 @@ def list_memory_items(
 
 @router.post("/api/memory/items")
 def upsert_memory_item(body: MemoryItemBody, principal: Principal = Depends(require_owner)) -> dict[str, Any]:
-    if contains_high_confidence_secret(body.content):
+    if contains_high_confidence_secret(body.model_dump(mode="json")):
         raise HTTPException(status_code=422, detail="Secrets must be stored in ALTER Vault, not ordinary memory")
     key = _key(body)
     if not key:

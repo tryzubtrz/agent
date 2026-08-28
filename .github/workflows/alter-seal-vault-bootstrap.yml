@@ -7,6 +7,11 @@ on:
       - main
     paths:
       - '.github/workflows/alter-seal-vault-bootstrap.yml'
+      - 'ALTER/core/app/main.py'
+      - 'ALTER/core/alter_core/main.py'
+      - 'ALTER/core/alter_core/vault_api.py'
+      - 'ALTER/core/alter_core/vault_store.py'
+      - 'ALTER/core/scripts/fetch_sealing_key.py'
 
 permissions:
   contents: write
@@ -22,10 +27,10 @@ jobs:
     steps:
       - name: Verify source credential exists
         env:
-          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+          BOTPRESS_RUNTIME_TOKEN: ${{ secrets.BOTPRESS_RUNTIME_TOKEN }}
         run: |
-          if [ -z "$BOTPRESS_PAT" ]; then
-            echo "BOTPRESS_PAT is not configured; sealing cannot continue."
+          if [ -z "$BOTPRESS_RUNTIME_TOKEN" ]; then
+            echo "BOTPRESS_RUNTIME_TOKEN (Bot Access Key) is not configured; sealing cannot continue."
             exit 3
           fi
 
@@ -36,27 +41,11 @@ jobs:
         run: python -m pip install --disable-pip-version-check 'cryptography>=43,<47'
 
       - name: Fetch ALTER public sealing key
-        run: |
-          python - <<'PY'
-          import json
-          import urllib.request
-          from pathlib import Path
-
-          url = 'https://alter-app-three.vercel.app/api/vault/bootstrap/public-key'
-          request = urllib.request.Request(url, headers={'User-Agent': 'ALTER-GitHub-Bootstrap/1.0'})
-          with urllib.request.urlopen(request, timeout=20) as response:
-              record = json.loads(response.read().decode('utf-8'))
-          if record.get('version') != 1 or record.get('algorithm') != 'X25519-HKDF-SHA256+A256GCM':
-              raise SystemExit('Unexpected ALTER public-key response.')
-          if record.get('value_exposed') is not False:
-              raise SystemExit('ALTER public-key endpoint violated no-secret contract.')
-          Path('/tmp/alter-public-key.json').write_text(json.dumps(record), encoding='utf-8')
-          print('Fetched ALTER public sealing key; no private material was returned.')
-          PY
+        run: python ALTER/core/scripts/fetch_sealing_key.py
 
       - name: Seal Botpress credential
         env:
-          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+          BOTPRESS_RUNTIME_TOKEN: ${{ secrets.BOTPRESS_RUNTIME_TOKEN }}
         run: |
           python - <<'PY'
           import base64
@@ -89,7 +78,7 @@ jobs:
           ).derive(shared)
           nonce = os.urandom(12)
           aad = f'1:{alias}'.encode('utf-8')
-          ciphertext = AESGCM(wrap_key).encrypt(nonce, os.environ['BOTPRESS_PAT'].encode('utf-8'), aad)
+          ciphertext = AESGCM(wrap_key).encrypt(nonce, os.environ['BOTPRESS_RUNTIME_TOKEN'].encode('utf-8'), aad)
           envelope = {
               'version': 1,
               'algorithm': 'X25519-HKDF-SHA256+A256GCM',
