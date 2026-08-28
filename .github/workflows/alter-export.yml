@@ -1,0 +1,81 @@
+name: ALTER Safe Export
+
+on:
+  push:
+    paths:
+      - ".github/workflows/alter-export.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build secret-safe ALTER handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf alter-export
+          mkdir -p alter-export
+          cp -a ALTER alter-export/ALTER
+          if [ -f README.md ]; then cp README.md alter-export/README.md; fi
+          mkdir -p alter-export/github-workflows
+          cp -a .github/workflows/. alter-export/github-workflows/
+
+          # Never export runtime secrets, local env files, build output, or the sealed bootstrap credential.
+          find alter-export -type f \( -name '.env' -o -name '.env.*' \) -delete
+          find alter-export -type d \( -name node_modules -o -name .next -o -name __pycache__ -o -name .pytest_cache -o -name dist -o -name build \) -prune -exec rm -rf {} + || true
+          rm -f alter-export/ALTER/core/alter_core/bootstrap_vault.json
+
+          cat > alter-export/REPLIT_AUDIT_INSTRUCTIONS.md <<'EOF'
+          # ALTER — Replit audit handoff
+
+          This archive is a secret-safe snapshot of the current ALTER source code.
+
+          ## Goal
+          Audit and improve ALTER without rebuilding it from scratch.
+
+          ## Required workflow
+          1. First inspect the existing architecture and identify what already works, what is partial, what is broken, and what is missing.
+          2. Preserve working modules and interfaces unless a change is necessary.
+          3. Run existing tests/build checks before changes and after each meaningful change.
+          4. Focus on production correctness, mobile UX, accessibility, error/loading/empty states, security boundaries, agent workflow, memory/RAG, approvals, model routing, telemetry, and connector reliability.
+          5. Do not claim anything works unless verified by tests or a real runtime check.
+
+          ## Do not add or prioritize yet
+          - Android executor
+          - browser/computer control
+          - Telegram
+          - Gmail
+          - TikTok/social posting
+
+          ## Security boundaries
+          - Never print or expose secrets.
+          - Never weaken Vault, auth, RBAC, approvals, audit, or policy controls to make tests pass.
+          - External AI/Botpress specialists must remain subordinate to ALTER Core and must not perform side effects directly.
+          - Do not convert encrypted/bootstrap credential material into plaintext.
+
+          ## Current product target
+          ALTER is an AI-agent control plane with Core, Web/PWA, Botpress specialist, Neon/Postgres, Vault, Tasks, Policies, Memory/RAG, Model Router, Documents, Automations/Scheduler, Media, RBAC, Audit and Observability.
+
+          ## Requested output
+          After making improvements, provide:
+          - exact list of changes made;
+          - tests/builds run and results;
+          - anything still unverified;
+          - remaining blockers;
+          - a ZIP or Git diff/patch of only the changed source files so the changes can be reviewed and merged back safely.
+          EOF
+
+      - name: Upload ALTER handoff
+        uses: actions/upload-artifact@v4
+        with:
+          name: alter-replit-handoff
+          path: alter-export/
+          if-no-files-found: error
+          retention-days: 7
