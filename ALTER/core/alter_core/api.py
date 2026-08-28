@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any, Literal
 from uuid import UUID
 
@@ -8,11 +9,15 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from .auth import Principal, require_owner
+from .memory_safety import (
+    is_protected_memory_namespace as _is_protected_memory_namespace,
+)
 from .models import ActionRequest, PolicyEffect, PolicyRule, Task, TaskStatus
 from .orchestrator import (
     ApprovalMismatchError,
     InMemoryTaskStore,
     InvalidTaskTransitionError,
+    PolicyDeniedApprovalError,
     SecretBearingActionError,
     TaskNotFoundError,
     TaskOrchestrator,
@@ -51,6 +56,49 @@ else:
 orchestrator = TaskOrchestrator(store=task_store)
 _memory_fallback: dict[tuple[UUID, UUID, str, str], Any] = {}
 _connector_fallback: dict[tuple[UUID, str], dict[str, Any]] = {}
+
+
+def _commit_task_transition_with_record(
+    *,
+    task_id: UUID,
+    principal: Principal,
+    namespace: str,
+    key: str,
+    value: Any,
+    transition: Callable[[Task], Task],
+) -> Task:
+    """Persist a task transition and its evidence as one logical operation."""
+    store = orchestrator.store
+    if isinstance(store, PostgresTaskStore):
+        return store.transition_with_memory(
+            task_id=task_id,
+            user_id=principal.user_id,
+            namespace=namespace,
+            key=key,
+            value=value,
+            transition=transition,
+        )
+
+    original = store.get(task_id).model_copy(deep=True)
+    updated = transition(original.model_copy(deep=True))
+    saved = store.save(updated)
+    try:
+        if memory_store is not None:
+            memory_store.upsert(
+                workspace_id=principal.workspace_id,
+                user_id=principal.user_id,
+                namespace=namespace,
+                key=key,
+                value=value,
+            )
+        else:
+            _memory_fallback[
+                (principal.workspace_id, principal.user_id, namespace, key)
+            ] = value
+    except Exception:
+        store.save(original)
+        raise
+    return saved
 
 
 def _clean_bounded_text_items(values: list[str], *, field_name: str, max_length: int) -> list[str]:
@@ -289,24 +337,18 @@ def complete_task(
         "acceptance_criteria_met": True,
         "verification_method": "owner_attestation",
     }
-    if memory_store is not None:
-        memory_store.upsert(
-            workspace_id=principal.workspace_id,
-            user_id=principal.user_id,
+    try:
+        task = _commit_task_transition_with_record(
+            task_id=task_id,
+            principal=principal,
             namespace="task.result",
             key=str(task_id),
             value=result_record,
-        )
-    else:
-        _memory_fallback[
-            (principal.workspace_id, principal.user_id, "task.result", str(task_id))
-        ] = result_record
-
-    try:
-        task = orchestrator.complete_task(
-            task_id=task_id,
-            workspace_id=principal.workspace_id,
-            owner_attestation_confirmed=True,
+            transition=lambda candidate: orchestrator.transition_task_completion(
+                candidate,
+                workspace_id=principal.workspace_id,
+                owner_attestation_confirmed=True,
+            ),
         )
     except InvalidTaskTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -358,29 +400,24 @@ def record_action_result(
         "verification_method": "owner_attestation",
     }
     try:
-        task = orchestrator.record_action_result(
+        result_key = f"{task_id}:{body.action_digest}"
+        task = _commit_task_transition_with_record(
             task_id=task_id,
-            workspace_id=principal.workspace_id,
-            action_digest=body.action_digest,
-            succeeded=body.succeeded,
-            failure_reason=None if body.succeeded else body.result_summary,
+            principal=principal,
+            namespace="task.action_result",
+            key=result_key,
+            value=result_record,
+            transition=lambda candidate: orchestrator.transition_action_result(
+                candidate,
+                workspace_id=principal.workspace_id,
+                action_digest=body.action_digest,
+                succeeded=body.succeeded,
+                failure_reason=None if body.succeeded else body.result_summary,
+            ),
         )
     except (InvalidTaskTransitionError, ApprovalMismatchError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    result_key = f"{task_id}:{body.action_digest}"
-    if memory_store is not None:
-        memory_store.upsert(
-            workspace_id=principal.workspace_id,
-            user_id=principal.user_id,
-            namespace="task.action_result",
-            key=result_key,
-            value=result_record,
-        )
-    else:
-        _memory_fallback[
-            (principal.workspace_id, principal.user_id, "task.action_result", result_key)
-        ] = result_record
     _audit(
         principal,
         event_type="action.result_attested",
@@ -629,6 +666,15 @@ def approve_action(
         raise HTTPException(status_code=404, detail="Task not found") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail="Workspace mismatch") from exc
+    except PolicyDeniedApprovalError as exc:
+        blocked = orchestrator.store.get(task_id)
+        _audit(
+            principal,
+            event_type="action.approval_blocked_by_policy",
+            task_id=blocked.id,
+            payload={"action_digest": body.action_digest, "reason": blocked.blocker},
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ApprovalMismatchError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -643,11 +689,6 @@ def _get_owned_task(task_id: UUID, principal: Principal) -> Task:
         raise HTTPException(status_code=404, detail="Task not found")
 
     return task
-
-
-def _is_protected_memory_namespace(namespace: str) -> bool:
-    normalized = namespace.strip().lower()
-    return normalized.startswith("_vault") or normalized == "vault_secure"
 
 
 def _audit(

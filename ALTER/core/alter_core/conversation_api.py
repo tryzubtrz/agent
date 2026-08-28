@@ -10,7 +10,17 @@ from pydantic import BaseModel, Field
 
 from .api import _audit, _memory_fallback, memory_store
 from .auth import Principal, require_owner
-from .botpress_gateway import BotpressGateway, BotpressRuntimeError, BotpressUnavailableError
+from .botpress_contract import (
+    REQUIRED_SPECIALIST_BOUNDARY,
+    BotpressContractError,
+    validate_specialist_output,
+)
+from .botpress_gateway import (
+    BotpressGateway,
+    BotpressRuntimeError,
+    BotpressUnavailableError,
+)
+from .memory_safety import is_rag_excluded_namespace
 from .secret_safety import redact_secrets
 
 router = APIRouter()
@@ -18,8 +28,6 @@ gateway = BotpressGateway()
 
 _MAX_MESSAGES = 60
 _CONTEXT_MESSAGES = 16
-_REQUIRED_SPECIALIST_BOUNDARY = "core-policy-required"
-_RAG_EXCLUDED_PREFIXES = ("_vault", "vault_secure", "access.")
 
 
 class AppendMessageBody(BaseModel):
@@ -99,7 +107,7 @@ def _rag(principal: Principal, query: str) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for row in _knowledge_rows(principal):
         namespace = str(row.get("namespace") or "")
-        if namespace == "conversation" or any(namespace.startswith(prefix) for prefix in _RAG_EXCLUDED_PREFIXES): continue
+        if is_rag_excluded_namespace(namespace): continue
         value = row.get("value")
         if isinstance(value, dict) and value.get("deleted"): continue
         try: raw = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -156,24 +164,21 @@ def respond_in_conversation(body: ChatBody, principal: Principal = Depends(requi
     except BotpressRuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    if output.get("sideEffectsPerformed") is not False:
-        raise HTTPException(status_code=502, detail="ALTER specialist violated the no-side-effect response contract.")
-    if output.get("boundary") != _REQUIRED_SPECIALIST_BOUNDARY:
-        raise HTTPException(status_code=502, detail="ALTER specialist returned an invalid execution boundary.")
-    response = output.get("response")
-    if not isinstance(response, str) or not response.strip():
-        raise HTTPException(status_code=502, detail="ALTER specialist returned no usable response.")
+    try:
+        response = validate_specialist_output(output)
+    except BotpressContractError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     owner_message = {"role": "user", "text": safe_owner_text, "created_at": datetime.now(timezone.utc).isoformat(), "redacted": owner_redacted}
-    safe_response, response_redacted = _redact(response.strip())
+    safe_response, response_redacted = _redact(response)
     agent_message = {"role": "agent", "text": safe_response, "created_at": datetime.now(timezone.utc).isoformat(), "redacted": response_redacted}
     updated = [*existing, owner_message, agent_message][-_MAX_MESSAGES:]
     _save_messages(principal, updated)
-    _audit(principal, event_type="conversation.responded", payload={"provider": "botpress", "message_count": len(updated), "owner_message_redacted": owner_redacted, "agent_message_redacted": response_redacted, "boundary": _REQUIRED_SPECIALIST_BOUNDARY, "rag_hits": len(knowledge)})
+    _audit(principal, event_type="conversation.responded", payload={"provider": "botpress", "message_count": len(updated), "owner_message_redacted": owner_redacted, "agent_message_redacted": response_redacted, "boundary": REQUIRED_SPECIALIST_BOUNDARY, "rag_hits": len(knowledge)})
 
     return {
         "provider": "botpress", "user": owner_message, "agent": agent_message, "persistent": True,
-        "side_effects_performed": False, "boundary": _REQUIRED_SPECIALIST_BOUNDARY,
+        "side_effects_performed": False, "boundary": REQUIRED_SPECIALIST_BOUNDARY,
         "knowledge_hits": [{"namespace": item["namespace"], "key": item["key"], "score": item["score"]} for item in knowledge],
         "retrieval_engine": "secret-safe-lexical-rag-v1",
     }
@@ -185,4 +190,3 @@ def clear_conversation(principal: Principal = Depends(require_owner)) -> dict[st
     _save_messages(principal, [])
     _audit(principal, event_type="conversation.cleared", payload={"message_count": 0})
     return {"cleared": True, "message_count": 0}
-

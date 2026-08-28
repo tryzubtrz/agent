@@ -1,11 +1,10 @@
 from types import SimpleNamespace
 from uuid import uuid4
 
-from fastapi.testclient import TestClient
-
-from api.index import app
 from alter_core import conversation_api
 from alter_core.botpress_gateway import BotpressGateway
+from api.index import app
+from fastapi.testclient import TestClient
 
 
 def configure_owner(monkeypatch):
@@ -129,6 +128,30 @@ def test_conversation_rejects_wrong_specialist_boundary(monkeypatch):
     )
     assert response.status_code == 502
     assert "boundary" in response.json()["detail"].lower()
+
+
+def test_conversation_rejects_oversized_specialist_response(monkeypatch):
+    token = configure_owner(monkeypatch)
+
+    class OversizedGateway:
+        def status(self):
+            return SimpleNamespace(configured=True)
+
+        def think(self, **_kwargs):
+            return {
+                "response": "x" * 50_001,
+                "sideEffectsPerformed": False,
+                "boundary": "core-policy-required",
+            }
+
+    monkeypatch.setattr(conversation_api, "gateway", OversizedGateway())
+    response = TestClient(app).post(
+        "/api/conversation/respond",
+        headers=auth(token),
+        json={"text": "Тест", "mode": "normal"},
+    )
+    assert response.status_code == 502
+    assert "oversized" in response.json()["detail"].lower()
 
 
 def test_system_status_is_truthful_and_secret_safe(monkeypatch):

@@ -31,8 +31,8 @@ class BotpressGateway:
 
     The gateway intentionally targets one Botpress Runtime action only. It does
     not expose the Admin API and never includes secrets in raised errors. The
-    external credential may still be a broad Botpress PAT, so it must remain in
-    ALTER Vault and should belong to a dedicated restricted Botpress account.
+    Production resolves only the Vault-backed Bot Access Key. Explicit and
+    environment credentials are limited to local/test use.
     """
 
     DEFAULT_BOT_ID = "64f3490a-183a-47c5-b825-97210771822f"
@@ -53,11 +53,20 @@ class BotpressGateway:
         self.timeout_seconds = timeout_seconds
 
     def _resolve_token(self) -> str:
+        production = (
+            os.getenv("VERCEL_ENV", "").strip().lower() == "production"
+            or os.getenv("ALTER_ENV", "").strip().lower() == "production"
+        )
+        if production:
+            return self._resolve_vault_token()
         if self._explicit_token is not None:
             return self._explicit_token.strip()
         env_token = os.getenv("BOTPRESS_RUNTIME_TOKEN", "").strip()
         if env_token:
             return env_token
+        return self._resolve_vault_token()
+
+    def _resolve_vault_token(self) -> str:
         try:
             return (load_secret(self.VAULT_ALIAS) or "").strip()
         except (VaultUnavailableError, VaultIntegrityError):

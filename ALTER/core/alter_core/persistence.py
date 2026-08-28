@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -90,6 +91,70 @@ class PostgresTaskStore:
                 (workspace_id, owner_user_id, limit),
             ).fetchall()
         return [Task.model_validate(row) for row in rows]
+
+    def transition_with_memory(
+        self,
+        *,
+        task_id: UUID,
+        user_id: UUID,
+        namespace: str,
+        key: str,
+        value: Any,
+        transition: Callable[[Task], Task],
+    ) -> Task:
+        """Commit a task transition and its evidence record atomically."""
+        with connect(self.dsn, row_factory=dict_row) as conn:
+            row = conn.execute(
+                """
+                SELECT id, workspace_id, owner_user_id, objective, status,
+                       acceptance_criteria, current_step, blocker, pending_action,
+                       created_at, updated_at
+                FROM tasks
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise TaskNotFoundError(str(task_id))
+
+            current = Task.model_validate(row)
+            if current.owner_user_id != user_id:
+                raise PermissionError("Cross-owner task transition denied.")
+            task = transition(current)
+            task.touch()
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = %s,
+                    current_step = %s,
+                    blocker = %s,
+                    pending_action = %s,
+                    updated_at = %s
+                WHERE id = %s AND workspace_id = %s
+                """,
+                (
+                    task.status.value,
+                    task.current_step,
+                    task.blocker,
+                    Jsonb(task.pending_action.model_dump(mode="json"))
+                    if task.pending_action is not None
+                    else None,
+                    task.updated_at,
+                    task.id,
+                    task.workspace_id,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO memories (workspace_id, user_id, namespace, key, value)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (workspace_id, user_id, namespace, key)
+                DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+                """,
+                (task.workspace_id, user_id, namespace, key, Jsonb(value)),
+            )
+        return task
 
 
 class PostgresPolicyStore:

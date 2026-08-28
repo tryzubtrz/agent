@@ -9,7 +9,12 @@ from pydantic import BaseModel, Field
 
 from .api import _audit, _get_owned_task, _memory_fallback, memory_store, orchestrator
 from .auth import Principal, require_owner
-from .botpress_gateway import BotpressGateway, BotpressRuntimeError, BotpressUnavailableError
+from .botpress_contract import BotpressContractError, validate_specialist_output
+from .botpress_gateway import (
+    BotpressGateway,
+    BotpressRuntimeError,
+    BotpressUnavailableError,
+)
 from .models import TaskStatus
 from .orchestrator import InvalidTaskTransitionError
 from .secret_safety import redact_secrets
@@ -62,17 +67,12 @@ def agent_think(
     except BotpressRuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    if output.get("sideEffectsPerformed") is not False:
-        raise HTTPException(status_code=502, detail="ALTER specialist violated the no-side-effect response contract.")
-    if output.get("boundary") != "core-policy-required":
-        raise HTTPException(status_code=502, detail="ALTER specialist returned an invalid execution boundary.")
-    response = output.get("response")
-    if not isinstance(response, str) or not response.strip():
-        raise HTTPException(status_code=502, detail="Botpress specialist returned no usable response.")
-    if len(response) > 50_000:
-        raise HTTPException(status_code=502, detail="Botpress specialist returned an oversized response.")
+    try:
+        response = validate_specialist_output(output)
+    except BotpressContractError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    safe_response, response_redacted = redact_secrets(response.strip())
+    safe_response, response_redacted = redact_secrets(response)
     redacted = objective_redacted or context_redacted or response_redacted
     _audit(
         principal,
@@ -133,17 +133,12 @@ def plan_task(
     except BotpressRuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    if output.get("sideEffectsPerformed") is not False:
-        raise HTTPException(status_code=502, detail="ALTER specialist violated the no-side-effect response contract.")
-    if output.get("boundary") != "core-policy-required":
-        raise HTTPException(status_code=502, detail="ALTER specialist returned an invalid execution boundary.")
-    response = output.get("response")
-    if not isinstance(response, str) or not response.strip():
-        raise HTTPException(status_code=502, detail="Botpress specialist returned no usable plan.")
-    if len(response) > 50_000:
-        raise HTTPException(status_code=502, detail="Botpress specialist returned an oversized plan.")
+    try:
+        response = validate_specialist_output(output, content_kind="plan")
+    except BotpressContractError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    safe_plan, plan_redacted = redact_secrets(response.strip())
+    safe_plan, plan_redacted = redact_secrets(response)
     plan_record = {
         "plan": safe_plan,
         "provider": "botpress",

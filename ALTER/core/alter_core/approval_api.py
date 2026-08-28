@@ -6,10 +6,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from .api import _audit, approval_store, orchestrator, policy_store, task_store
 from .auth import Principal, require_owner
 from .models import Approval, Task, TaskStatus
-from .orchestrator import ApprovalMismatchError
-from .api import _audit, approval_store, orchestrator, policy_store, task_store
+from .orchestrator import ApprovalMismatchError, PolicyDeniedApprovalError
 
 router = APIRouter()
 
@@ -73,6 +73,15 @@ def approve_pending(
             action_digest=body.action_digest,
             owner_rules=policy_store.list_for_workspace(principal.workspace_id),
         )
+    except PolicyDeniedApprovalError as exc:
+        blocked = task_store.get(task_id)
+        _audit(
+            principal,
+            event_type="action.approval_blocked_by_policy",
+            task_id=blocked.id,
+            payload={"action_digest": body.action_digest, "reason": blocked.blocker, "source": "approval_ui"},
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ApprovalMismatchError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

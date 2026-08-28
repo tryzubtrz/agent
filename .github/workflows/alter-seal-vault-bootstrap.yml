@@ -26,10 +26,10 @@ jobs:
     steps:
       - name: Verify source credential exists
         env:
-          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+          BOTPRESS_RUNTIME_TOKEN: ${{ secrets.BOTPRESS_RUNTIME_TOKEN }}
         run: |
-          if [ -z "$BOTPRESS_PAT" ]; then
-            echo "BOTPRESS_PAT is not configured; sealing cannot continue."
+          if [ -z "$BOTPRESS_RUNTIME_TOKEN" ]; then
+            echo "BOTPRESS_RUNTIME_TOKEN (Bot Access Key) is not configured; sealing cannot continue."
             exit 3
           fi
 
@@ -57,7 +57,17 @@ jobs:
                   with urllib.request.urlopen(request, timeout=20) as response:
                       record = json.loads(response.read().decode('utf-8'))
                   break
-              except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+              except urllib.error.HTTPError as exc:
+                  propagation_404 = exc.code == 404 and attempt <= 3
+                  recoverable = exc.code in {408, 425, 429} or 500 <= exc.code <= 599
+                  if not (propagation_404 or recoverable):
+                      raise
+                  last_error = exc
+                  if attempt == 12:
+                      break
+                  print(f'ALTER endpoint is not ready (HTTP {exc.code}, attempt {attempt}/12); retrying in 10 seconds.')
+                  time.sleep(10)
+              except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
                   last_error = exc
                   if attempt == 12:
                       break
@@ -75,7 +85,7 @@ jobs:
 
       - name: Seal Botpress credential
         env:
-          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+          BOTPRESS_RUNTIME_TOKEN: ${{ secrets.BOTPRESS_RUNTIME_TOKEN }}
         run: |
           python - <<'PY'
           import base64
@@ -108,7 +118,7 @@ jobs:
           ).derive(shared)
           nonce = os.urandom(12)
           aad = f'1:{alias}'.encode('utf-8')
-          ciphertext = AESGCM(wrap_key).encrypt(nonce, os.environ['BOTPRESS_PAT'].encode('utf-8'), aad)
+          ciphertext = AESGCM(wrap_key).encrypt(nonce, os.environ['BOTPRESS_RUNTIME_TOKEN'].encode('utf-8'), aad)
           envelope = {
               'version': 1,
               'algorithm': 'X25519-HKDF-SHA256+A256GCM',

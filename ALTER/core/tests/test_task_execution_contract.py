@@ -1,12 +1,14 @@
+import os
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from fastapi.testclient import TestClient
-
-from api.index import app
-from alter_core import agent_api
+from alter_core import agent_api, conversation_api
+from alter_core import api as core_api
+from alter_core.auth import Principal
 from alter_core.models import ActionRequest
-from alter_core.rag_engine import retrieve_rows
+from alter_core.secret_safety import contains_high_confidence_secret
+from api.index import app
+from fastapi.testclient import TestClient
 
 
 def configure_owner(monkeypatch) -> str:
@@ -43,6 +45,17 @@ def test_task_rejects_secret_like_objective(monkeypatch):
     )
     assert response.status_code == 422
     assert "vault" in response.json()["detail"].lower()
+
+
+def test_task_accepts_vault_alias_embedded_in_objective(monkeypatch):
+    token = configure_owner(monkeypatch)
+    response = TestClient(app).post(
+        "/api/tasks",
+        headers=auth(token),
+        json={"objective": "Deploy using password=vault:botpress_runtime"},
+    )
+    assert response.status_code == 200
+    assert response.json()["objective"] == "Deploy using password=vault:botpress_runtime"
 
 
 def test_completion_requires_ready_state_evidence_and_acceptance(monkeypatch):
@@ -312,6 +325,36 @@ def test_action_cannot_skip_planning_and_active_action_is_retained(monkeypatch):
     assert retained.json()["pending_action"]["operation"] == "create_report"
 
 
+def test_second_action_cannot_replace_active_action(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(app)
+    task = create_task(client, token)
+    assert client.post(f"/api/tasks/{task['id']}/ready", headers=auth(token)).status_code == 200
+    first = {
+        "workspace_id": task["workspace_id"],
+        "task_id": task["id"],
+        "category": "files",
+        "operation": "create_report",
+        "risk": "reversible",
+        "target": "artifact:first",
+        "parameters": {},
+        "requires_human_auth": False,
+    }
+    started = client.post("/api/actions/evaluate", headers=auth(token), json={"action": first})
+    assert started.status_code == 200
+
+    second = client.post(
+        "/api/actions/evaluate",
+        headers=auth(token),
+        json={"action": {**first, "operation": "delete_report", "target": "artifact:second"}},
+    )
+    assert second.status_code == 409
+
+    retained = client.get(f"/api/tasks/{task['id']}", headers=auth(token)).json()
+    assert retained["pending_action"]["operation"] == "create_report"
+    assert retained["pending_action"]["target"] == "artifact:first"
+
+
 def test_action_rejects_raw_secret_parameters_before_persistence(monkeypatch):
     token = configure_owner(monkeypatch)
     client = TestClient(app)
@@ -460,18 +503,237 @@ def test_failed_action_enters_recovery_and_keeps_failure_evidence(monkeypatch):
     assert "returned an error" in failed.json()["blocker"]
 
 
-def test_rag_never_returns_runtime_vault_namespaces():
-    rows = [
-        {
-            "namespace": "vault_secure",
-            "key": "vault:botpress_runtime",
-            "value": {"note": "purple elephant runtime credential"},
+def test_pause_resume_restores_active_action_to_attestable_state(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(app)
+    task = create_task(client, token)
+    assert client.post(f"/api/tasks/{task['id']}/ready", headers=auth(token)).status_code == 200
+    action = {
+        "workspace_id": task["workspace_id"],
+        "task_id": task["id"],
+        "category": "files",
+        "operation": "create_report",
+        "risk": "reversible",
+        "target": "artifact:audit-report",
+        "parameters": {},
+        "requires_human_auth": False,
+    }
+    executing = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action}).json()
+    digest = ActionRequest.model_validate(executing["pending_action"]).digest()
+
+    paused = client.post(
+        f"/api/tasks/{task['id']}/control",
+        headers=auth(token),
+        json={"action": "pause"},
+    )
+    assert paused.status_code == 200
+    assert paused.json()["status"] == "paused"
+    assert paused.json()["pending_action"] is not None
+
+    resumed = client.post(
+        f"/api/tasks/{task['id']}/control",
+        headers=auth(token),
+        json={"action": "resume"},
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["status"] == "executing"
+
+    verified = client.post(
+        f"/api/tasks/{task['id']}/action-result",
+        headers=auth(token),
+        json={
+            "action_digest": digest,
+            "succeeded": True,
+            "result_summary": "Report created.",
+            "verification_evidence": ["Artifact opened"],
+            "artifact_refs": ["artifact:audit-report"],
         },
-        {
-            "namespace": "knowledge",
-            "key": "safe",
-            "value": {"note": "purple elephant documentation"},
+    )
+    assert verified.status_code == 200
+    assert verified.json()["status"] == "ready"
+
+
+def test_completion_rolls_back_when_evidence_persistence_fails(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(app)
+    task = create_task(client, token)
+    assert client.post(f"/api/tasks/{task['id']}/ready", headers=auth(token)).status_code == 200
+
+    class FailingMemoryStore:
+        def upsert(self, **_kwargs):
+            raise RuntimeError("simulated memory outage")
+
+    monkeypatch.setattr(core_api, "memory_store", FailingMemoryStore())
+    failed = TestClient(app, raise_server_exceptions=False).post(
+        f"/api/tasks/{task['id']}/complete",
+        headers=auth(token),
+        json={
+            "result_summary": "Result exists.",
+            "verification_evidence": ["Verification passed"],
+            "artifact_refs": [],
+            "acceptance_criteria_met": True,
         },
-    ]
-    hits = retrieve_rows(rows, "purple elephant", limit=10)
-    assert [item["namespace"] for item in hits] == ["knowledge"]
+    )
+    assert failed.status_code == 500
+    unchanged = client.get(f"/api/tasks/{task['id']}", headers=auth(token)).json()
+    assert unchanged["status"] == "ready"
+
+
+def test_action_result_rolls_back_when_evidence_persistence_fails(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(app)
+    task = create_task(client, token)
+    assert client.post(f"/api/tasks/{task['id']}/ready", headers=auth(token)).status_code == 200
+    action = {
+        "workspace_id": task["workspace_id"],
+        "task_id": task["id"],
+        "category": "files",
+        "operation": "create_report",
+        "risk": "reversible",
+        "target": "artifact:audit-report",
+        "parameters": {},
+        "requires_human_auth": False,
+    }
+    executing = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action}).json()
+    digest = ActionRequest.model_validate(executing["pending_action"]).digest()
+
+    class FailingMemoryStore:
+        def upsert(self, **_kwargs):
+            raise RuntimeError("simulated memory outage")
+
+    monkeypatch.setattr(core_api, "memory_store", FailingMemoryStore())
+    failed = TestClient(app, raise_server_exceptions=False).post(
+        f"/api/tasks/{task['id']}/action-result",
+        headers=auth(token),
+        json={
+            "action_digest": digest,
+            "succeeded": True,
+            "result_summary": "Report created.",
+            "verification_evidence": ["Artifact opened"],
+            "artifact_refs": [],
+        },
+    )
+    assert failed.status_code == 500
+    unchanged = client.get(f"/api/tasks/{task['id']}", headers=auth(token)).json()
+    assert unchanged["status"] == "executing"
+    assert unchanged["pending_action"]["operation"] == "create_report"
+
+
+def test_typed_memory_validates_every_field_and_delete_route_is_reachable(monkeypatch):
+    token = configure_owner(monkeypatch)
+    client = TestClient(app)
+
+    rejected = client.post(
+        "/api/memory/items",
+        headers=auth(token),
+        json={
+            "key": "typed-secret",
+            "kind": "fact",
+            "content": "Public documentation note",
+            "source": "https://user:password@example.com",
+            "tags": ["docs"],
+        },
+    )
+    assert rejected.status_code == 422
+
+    created = client.post(
+        "/api/memory/items",
+        headers=auth(token),
+        json={
+            "key": "typed-one",
+            "kind": "fact",
+            "content": "Safe typed memory",
+            "source": "owner",
+            "tags": ["docs"],
+        },
+    )
+    assert created.status_code == 200
+    deleted = client.delete("/api/memory/items/typed-one", headers=auth(token))
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "key": "typed-one"}
+    listed = client.get("/api/memory/items", headers=auth(token)).json()
+    assert all(item["key"] != "typed-one" for item in listed["items"])
+
+
+def test_compound_secret_field_names_are_rejected_but_vault_aliases_are_allowed():
+    for field_name in (
+        "client_secret",
+        "secret_key",
+        "api_token",
+        "private_key",
+        "refresh_secret",
+    ):
+        assert contains_high_confidence_secret({field_name: "high-confidence-secret-value"}) is True
+        assert contains_high_confidence_secret({field_name: "vault:approved_alias"}) is False
+
+
+def test_rag_paths_exclude_normalized_runtime_vault_namespaces(monkeypatch):
+    token = configure_owner(monkeypatch)
+    workspace_id = UUID(os.environ["ALTER_OWNER_WORKSPACE_ID"])
+    user_id = UUID(os.environ["ALTER_OWNER_USER_ID"])
+    core_api._memory_fallback[(workspace_id, user_id, " VAULT_SECURE ", "runtime")] = {
+        "note": "purple elephant runtime credential"
+    }
+    core_api._memory_fallback[(workspace_id, user_id, " _VaUlT.Runtime ", "runtime-two")] = {
+        "note": "purple elephant second credential"
+    }
+    core_api._memory_fallback[(workspace_id, user_id, "knowledge", "safe")] = {
+        "note": "purple elephant documentation"
+    }
+
+    response = TestClient(app).post(
+        "/api/rag/search",
+        headers=auth(token),
+        json={"query": "purple elephant", "limit": 10},
+    )
+    assert response.status_code == 200
+    assert [item["namespace"] for item in response.json()["hits"]] == ["knowledge"]
+
+    principal = Principal(user_id=user_id, workspace_id=workspace_id)
+    conversation_hits = conversation_api._rag(principal, "purple elephant")
+    assert [item["namespace"] for item in conversation_hits] == ["knowledge"]
+
+
+def test_policy_denied_stale_approval_is_audited(monkeypatch):
+    token = configure_owner(monkeypatch)
+    events: list[dict] = []
+
+    class CapturingAuditStore:
+        def write(self, **kwargs):
+            events.append(kwargs)
+
+    monkeypatch.setattr(core_api, "audit_store", CapturingAuditStore())
+    client = TestClient(app)
+    task = create_task(client, token)
+    assert client.post(f"/api/tasks/{task['id']}/ready", headers=auth(token)).status_code == 200
+    action = {
+        "workspace_id": task["workspace_id"],
+        "task_id": task["id"],
+        "category": "social_publish",
+        "operation": "publish_post",
+        "risk": "public",
+        "target": "social:post",
+        "parameters": {},
+        "requires_human_auth": False,
+    }
+    waiting = client.post("/api/actions/evaluate", headers=auth(token), json={"action": action}).json()
+    digest = ActionRequest.model_validate(waiting["pending_action"]).digest()
+    denied = client.post(
+        "/api/policies",
+        headers=auth(token),
+        json={
+            "original_text": "Do not publish",
+            "category": "social_publish",
+            "effect": "deny",
+            "priority": 1,
+        },
+    )
+    assert denied.status_code == 200
+
+    approval = client.post(
+        f"/api/tasks/{task['id']}/approve",
+        headers=auth(token),
+        json={"action_digest": digest},
+    )
+    assert approval.status_code == 409
+    assert any(event["event_type"] == "action.approval_blocked_by_policy" for event in events)

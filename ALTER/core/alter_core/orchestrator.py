@@ -23,6 +23,10 @@ class ApprovalMismatchError(ValueError):
     pass
 
 
+class PolicyDeniedApprovalError(ApprovalMismatchError):
+    pass
+
+
 class InvalidTaskTransitionError(ValueError):
     pass
 
@@ -144,6 +148,11 @@ class TaskOrchestrator:
                 f"Task cannot request an action from {task.status.value}."
             )
 
+        if task.pending_action is not None:
+            raise InvalidTaskTransitionError(
+                "The active action must be verified or cancelled before a new action is requested."
+            )
+
         decision = self.policy_engine.evaluate(action, owner_rules or [])
 
         if decision.effect == PolicyEffect.DENY:
@@ -199,7 +208,7 @@ class TaskOrchestrator:
             task.blocker = current_decision.reason
             task.pending_action = None
             self.store.save(task)
-            raise ApprovalMismatchError(
+            raise PolicyDeniedApprovalError(
                 "Current policy denies the pending action; the stale approval was not applied."
             )
 
@@ -237,6 +246,25 @@ class TaskOrchestrator:
         owner_attestation_confirmed: bool,
     ) -> Task:
         task = self.store.get(task_id)
+        task = self.transition_task_completion(
+            task,
+            workspace_id=workspace_id,
+            owner_attestation_confirmed=owner_attestation_confirmed,
+        )
+        return self.store.save(task)
+
+    def transition_task_completion(
+        self,
+        task: Task,
+        *,
+        workspace_id: UUID,
+        owner_attestation_confirmed: bool,
+    ) -> Task:
+        """Validate and apply completion without persisting it.
+
+        Persistence adapters use this pure transition inside a database
+        transaction so the task state and verification record commit together.
+        """
         self._assert_same_workspace(task, workspace_id)
         if not owner_attestation_confirmed:
             raise InvalidTaskTransitionError(
@@ -257,7 +285,7 @@ class TaskOrchestrator:
         task.current_step = "report_and_memory"
         task.blocker = None
         task.pending_action = None
-        return self.store.save(task)
+        return task
 
     def record_action_result(
         self,
@@ -269,6 +297,25 @@ class TaskOrchestrator:
         failure_reason: str | None = None,
     ) -> Task:
         task = self.store.get(task_id)
+        task = self.transition_action_result(
+            task,
+            workspace_id=workspace_id,
+            action_digest=action_digest,
+            succeeded=succeeded,
+            failure_reason=failure_reason,
+        )
+        return self.store.save(task)
+
+    def transition_action_result(
+        self,
+        task: Task,
+        *,
+        workspace_id: UUID,
+        action_digest: str,
+        succeeded: bool,
+        failure_reason: str | None = None,
+    ) -> Task:
+        """Validate and apply an action result without persisting it."""
         self._assert_same_workspace(task, workspace_id)
         if task.status != TaskStatus.EXECUTING or task.pending_action is None:
             raise InvalidTaskTransitionError(
@@ -288,7 +335,7 @@ class TaskOrchestrator:
             task.status = TaskStatus.RECOVERING
             task.current_step = "action_failed_recovery"
             task.blocker = failure_reason or "The active action failed verification."
-        return self.store.save(task)
+        return task
 
     @staticmethod
     def _assert_same_workspace(task: Task, workspace_id: UUID) -> None:

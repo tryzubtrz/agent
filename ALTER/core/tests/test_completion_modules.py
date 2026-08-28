@@ -1,12 +1,14 @@
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
-from fastapi.testclient import TestClient
-
+from alter_core import api as core_api
+from alter_core import botpress_gateway, conversation_api
+from alter_core.botpress_gateway import BotpressGateway
 from api.index import app
 from app.main import app as vercel_app
-from alter_core import conversation_api
+from fastapi.testclient import TestClient
 
 
 def configure_owner(monkeypatch):
@@ -107,14 +109,23 @@ def test_rag_excludes_vault_and_includes_document_knowledge(monkeypatch):
         json={"namespace": "_vault.runtime", "key": "vault:test", "value": {"note": "purple-elephant-secret-context"}},
     )
     assert blocked.status_code == 403
-    conversation_api._memory_fallback[
-        (
-            UUID(os.environ["ALTER_OWNER_WORKSPACE_ID"]),
-            UUID(os.environ["ALTER_OWNER_USER_ID"]),
-            "_vault.runtime",
-            "vault:test",
-        )
-    ] = {"note": "purple-elephant-secret-context"}
+    workspace_id = UUID(os.environ["ALTER_OWNER_WORKSPACE_ID"])
+    user_id = UUID(os.environ["ALTER_OWNER_USER_ID"])
+    protected_rows = (
+        ("_vault.runtime", "vault:test", {"note": "purple-elephant-secret-context"}),
+        ("vault_secure", "vault:runtime", {"note": "purple-elephant-second-secret-context"}),
+    )
+    for namespace, key, value in protected_rows:
+        if core_api.memory_store is not None:
+            core_api.memory_store.upsert(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                namespace=namespace,
+                key=key,
+                value=value,
+            )
+        else:
+            core_api._memory_fallback[(workspace_id, user_id, namespace, key)] = value
     client.put(
         "/api/memory",
         headers=auth(token),
@@ -142,6 +153,7 @@ def test_rag_excludes_vault_and_includes_document_knowledge(monkeypatch):
     context = captured["context"]
     assert "ALTER project codename" in context
     assert "purple-elephant-secret-context" not in context
+    assert "purple-elephant-second-secret-context" not in context
 
 
 def test_forwarded_actor_identity_is_validated_after_bearer(monkeypatch):
@@ -149,3 +161,28 @@ def test_forwarded_actor_identity_is_validated_after_bearer(monkeypatch):
     client = TestClient(app)
     assert client.get("/api/tasks", headers={"X-ALTER-Actor-Role": "operator", "X-ALTER-Actor-Id": "member-x"}).status_code == 401
     assert client.get("/api/tasks", headers=auth(token, role="operator", actor_id="member-x")).status_code == 200
+
+
+def test_production_botpress_gateway_uses_only_vault_runtime_credential(monkeypatch):
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("BOTPRESS_RUNTIME_TOKEN", "environment-token-must-not-win")
+    monkeypatch.setattr(botpress_gateway, "load_secret", lambda _alias: "vault-backed-bot-access-key")
+
+    gateway = BotpressGateway(token="explicit-token-must-not-win")
+
+    assert gateway.token == "vault-backed-bot-access-key"
+
+
+def test_botpress_workflows_separate_deploy_and_runtime_credentials():
+    repository_root = Path(__file__).resolve().parents[3]
+    deploy = (repository_root / ".github/workflows/alter-botpress-deploy.yml").read_text(encoding="utf-8")
+    seal = (repository_root / ".github/workflows/alter-seal-vault-bootstrap.yml").read_text(encoding="utf-8")
+    readme = (repository_root / "ALTER/botpress/README.md").read_text(encoding="utf-8")
+
+    assert 'Authorization: Bearer $BOTPRESS_RUNTIME_TOKEN' in deploy
+    assert "CONTRACT_OUTCOME" in deploy
+    assert "if contract_outcome == 'success'" in deploy
+    assert "os.environ['BOTPRESS_RUNTIME_TOKEN']" in seal
+    assert "except urllib.error.HTTPError as exc" in seal
+    assert "recoverable =" in seal
+    assert "Bot Access Key" in readme

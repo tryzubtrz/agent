@@ -28,18 +28,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check Botpress secret
+      - name: Check Botpress credentials
         id: auth
         env:
           BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+          BOTPRESS_RUNTIME_TOKEN: ${{ secrets.BOTPRESS_RUNTIME_TOKEN }}
         run: |
           if [ -z "$BOTPRESS_PAT" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "BOTPRESS_PAT is not configured yet; deployment cannot continue."
             exit 3
-          else
-            echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
+          if [ -z "$BOTPRESS_RUNTIME_TOKEN" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "BOTPRESS_RUNTIME_TOKEN (Bot Access Key) is not configured; contract verification cannot continue."
+            exit 3
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -80,8 +85,9 @@ jobs:
         run: npx adk deploy --yes --allow-unconfigured
 
       - name: Verify deployed alterThink contract
+        id: contract
         env:
-          BOTPRESS_PAT: ${{ secrets.BOTPRESS_PAT }}
+          BOTPRESS_RUNTIME_TOKEN: ${{ secrets.BOTPRESS_RUNTIME_TOKEN }}
         run: |
           set -euo pipefail
           cat >/tmp/alter-think-request.json <<'JSON'
@@ -96,7 +102,7 @@ jobs:
           JSON
           HTTP_STATUS=$(curl -sS -o /tmp/botpress-runtime.json -w '%{http_code}' \
             --request POST \
-            -H "Authorization: Bearer $BOTPRESS_PAT" \
+            -H "Authorization: Bearer $BOTPRESS_RUNTIME_TOKEN" \
             -H "x-bot-id: $BOTPRESS_BOT_ID" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
@@ -135,16 +141,23 @@ jobs:
           REPO: ${{ github.repository }}
           JOB_STATUS: ${{ job.status }}
           AUTH_OUTCOME: ${{ steps.auth.outcome }}
+          CONTRACT_OUTCOME: ${{ steps.contract.outcome }}
         run: |
           BODY=$(python - <<'PY'
           import json, os
+          contract_outcome = os.environ.get('CONTRACT_OUTCOME') or 'not-run'
+          contract_report = (
+              'The deployed alterThink action contract was verified after deployment.'
+              if contract_outcome == 'success'
+              else f'The alterThink contract was not verified (step outcome: {contract_outcome}).'
+          )
           body = (
               'Cloud deployment report. No secret values are included.\n\n'
               f"Job status: {os.environ.get('JOB_STATUS')}\n"
               f"Secret check step: {os.environ.get('AUTH_OUTCOME')}\n"
               'Target workspace: wkspace_01M0XTFXYMFEDGHEEKT710G22P\n'
               'Target bot: 64f3490a-183a-47c5-b825-97210771822f\n'
-              'The deployed alterThink action contract is verified after deployment.\n'
+              f'{contract_report}\n'
               'Unconfigured optional dependencies are allowed to remain inert.'
           )
           print(json.dumps(body))
@@ -156,4 +169,3 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$REPO/issues" \
             -d "{\"title\":\"ALTER Botpress deploy: $JOB_STATUS\",\"body\":$BODY}"
-

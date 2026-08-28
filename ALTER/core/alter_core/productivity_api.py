@@ -224,17 +224,17 @@ def task_meta(task_id: UUID, body: TaskMetaBody, principal: Principal = Depends(
 def task_control(task_id: UUID, body: TaskControlBody, principal: Principal = Depends(require_owner)) -> dict[str, Any]:
     task = _get_owned_task(task_id, principal)
     if body.action == "pause":
-        if task.status in {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED}:
-            raise HTTPException(status_code=409, detail="Terminal task cannot be paused.")
+        if task.status not in {TaskStatus.READY, TaskStatus.EXECUTING, TaskStatus.RECOVERING}:
+            raise HTTPException(status_code=409, detail=f"Task cannot be paused from {task.status.value}.")
         task.status = TaskStatus.PAUSED
         task.blocker = body.reason or "Paused by owner."
         task.current_step = "paused"
     elif body.action == "resume":
         if task.status != TaskStatus.PAUSED:
             raise HTTPException(status_code=409, detail="Only paused tasks can be resumed.")
-        task.status = TaskStatus.READY
+        task.status = TaskStatus.EXECUTING if task.pending_action is not None else TaskStatus.READY
         task.blocker = None
-        task.current_step = "resume_preflight"
+        task.current_step = task.pending_action.operation if task.pending_action is not None else "resume_preflight"
     elif body.action == "retry":
         if task.status not in {TaskStatus.FAILED, TaskStatus.BLOCKED_BY_RULE, TaskStatus.RECOVERING}:
             raise HTTPException(status_code=409, detail="Only failed or blocked tasks can be retried.")

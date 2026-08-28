@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Iterable
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any
 
+from .memory_safety import is_rag_excluded_namespace
 from .secret_safety import redact_secrets
 
-EXCLUDED_NAMESPACE_PREFIXES = ("_vault", "vault_secure", "access.", "conversation")
 DEFAULT_CHUNK_SIZE = 1200
 DEFAULT_CHUNK_OVERLAP = 180
 
@@ -125,7 +126,7 @@ def retrieve_rows(
     results: list[dict[str, Any]] = []
     for row in rows:
         namespace = str(row.get("namespace") or "")
-        if not namespace or any(namespace.startswith(prefix) for prefix in EXCLUDED_NAMESPACE_PREFIXES):
+        if is_rag_excluded_namespace(namespace):
             continue
         raw_text, source = _row_text(row)
         safe_text, redacted = redact_secrets(raw_text)

@@ -21,16 +21,18 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"\b(?:bp|bpt|botpress)_[A-Za-z0-9_-]{16,}\b", re.IGNORECASE), "[REDACTED_BOTPRESS_TOKEN]"),
-    (
-        re.compile(
-            r"(?i)\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|auth(?:orization)?|password|passwd|secret|cookie|session[_ -]?token|pat)\s*[:=]\s*([^\s,;]{6,})"
-        ),
-        r"\1=[REDACTED]",
-    ),
 )
 
+_SECRET_LABEL = (
+    r"(?:api|access|refresh|session|client)[_ -]?(?:key|token|secret)"
+    r"|private[_ -]?key|secret(?:[_ -]?(?:key|token))?"
+    r"|auth(?:orization)?|password|passwd|cookie|pat"
+)
+_SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)\b({_SECRET_LABEL})\s*[:=]\s*([^\s,;]{{6,}})"
+)
 _SECRET_FIELD_NAME = re.compile(
-    r"(?i)^(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|auth(?:orization)?|password|passwd|secret|cookie|session[_ -]?token|pat)$"
+    rf"(?i)^(?:{_SECRET_LABEL})$"
 )
 
 
@@ -46,6 +48,15 @@ def redact_secrets(text: str) -> tuple[str, bool]:
         if updated != safe:
             changed = True
             safe = updated
+    updated = _SECRET_ASSIGNMENT.sub(
+        lambda match: match.group(0)
+        if _is_vault_alias(match.group(2))
+        else f"{match.group(1)}=[REDACTED]",
+        safe,
+    )
+    if updated != safe:
+        changed = True
+        safe = updated
     return safe, changed
 
 

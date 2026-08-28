@@ -131,6 +131,7 @@ export default function TaskPage() {
 
   if (!data) return <ModuleShell title="Задача" eyebrow="TASK INSPECTOR"><section style={panel}>{error || "Завантажую…"}</section></ModuleShell>;
   const task = data.task;
+  const canPause = ["ready", "executing", "recovering"].includes(task.status);
 
   return (
     <ModuleShell title="Task Inspector" eyebrow="EXPLAIN · CONTROL · RECOVER">
@@ -141,7 +142,7 @@ export default function TaskPage() {
         <div style={muted}>Створено {formatDate(task.created_at)} · оновлено {formatDate(task.updated_at)}</div>
         {data.pending_action_digest && <div style={{ ...muted, wordBreak: "break-all" }}>Pending action digest: {data.pending_action_digest}</div>}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {!['done','failed','cancelled','paused'].includes(task.status) && <button disabled={busy} onClick={() => void control('pause')} style={primary}>Пауза</button>}
+          {canPause && <button disabled={busy} onClick={() => void control('pause')} style={primary}>Пауза</button>}
           {task.status === 'paused' && <button disabled={busy} onClick={() => void control('resume')} style={primary}>Продовжити</button>}
           {['failed','blocked_by_rule','recovering'].includes(task.status) && <button disabled={busy} onClick={() => void control('retry')} style={primary}>Повторити</button>}
           {!['done','cancelled'].includes(task.status) && <button disabled={busy} onClick={() => void control('cancel')} style={danger}>Скасувати</button>}
