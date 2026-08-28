@@ -1,7 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import OwnerGate from "@/components/OwnerGate";
 import ApprovalCenter from "@/components/ApprovalCenter";
-import ModuleRouteBridge from "@/components/ModuleRouteBridge";
 import Telemetry from "@/components/Telemetry";
 import ToolLauncher from "@/components/ToolLauncher";
 import "./globals.css";
@@ -35,7 +34,6 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <OwnerGate>
           {children}
           <ApprovalCenter />
-          <ModuleRouteBridge />
           <Telemetry />
           <ToolLauncher />
         </OwnerGate>
