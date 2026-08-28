@@ -6,12 +6,14 @@ import ModuleShell, { muted, panel, primary } from "@/components/ModuleShell";
 import { core, formatDate } from "@/lib/core-client";
 
 type Task = { id: string; objective: string; status: string; current_step?: string | null; blocker?: string | null; updated_at: string; acceptance_criteria: string[] };
+type PlannedTask = { task: Task; plan: { plan: string } };
 
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [objective, setObjective] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   const refresh = useCallback(async () => {
     try { setTasks(await core<Task[]>("/tasks?limit=250")); setError(""); }
@@ -23,22 +25,45 @@ export default function TasksPage() {
     const value = objective.trim();
     if (!value || busy) return;
     setBusy(true);
+    setError("");
+    setNotice("");
     try {
-      const task = await core<Task>("/tasks", { method: "POST", body: JSON.stringify({ objective: value, acceptance_criteria: [] }) });
-      await core(`/tasks/${task.id}/meta`, { method: "PUT", body: JSON.stringify({ expected_result: null, deadline: null, autonomy: "balanced", sources: [], notes: null }) });
+      const task = await core<Task>("/tasks", {
+        method: "POST",
+        body: JSON.stringify({ objective: value, acceptance_criteria: [] }),
+      });
+      await core(`/tasks/${task.id}/meta`, {
+        method: "PUT",
+        body: JSON.stringify({ expected_result: null, deadline: null, autonomy: "balanced", sources: [], notes: null }),
+      });
+
+      try {
+        const planned = await core<PlannedTask>(`/tasks/${task.id}/plan`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "plan", context: "" }),
+        });
+        setNotice(`Задачу створено і сплановано. Статус: ${planned.task.status}.`);
+      } catch (planError) {
+        setNotice("Задачу створено, але ALTER не зміг автоматично сформувати план. Відкрий Task Inspector — задача не втрачена.");
+        setError(planError instanceof Error ? planError.message : "Автопланування не виконано");
+      }
+
       setObjective("");
       await refresh();
-    } catch (err) { setError(err instanceof Error ? err.message : "Не вдалося створити задачу"); }
-    finally { setBusy(false); }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не вдалося створити задачу");
+    } finally { setBusy(false); }
   }
 
   return (
     <ModuleShell title="Задачі" eyebrow="OPERATIONS CENTER">
       <section style={{ ...panel, display: "grid", gap: 10 }}>
         <strong>Нова задача</strong>
-        <textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} placeholder="Опиши результат, який хочеш отримати…" style={{ ...input, resize: "vertical" }} />
-        <button type="button" onClick={() => void createTask()} disabled={busy || !objective.trim()} style={primary}>{busy ? "Створюю…" : "Створити"}</button>
+        <div style={muted}>Опиши результат. ALTER створить задачу, збереже її в Core і одразу спробує сформувати план — без ручного «Ready».</div>
+        <textarea value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} placeholder="Що потрібно отримати в результаті?" style={{ ...input, resize: "vertical" }} />
+        <button type="button" onClick={() => void createTask()} disabled={busy || !objective.trim()} style={primary}>{busy ? "ALTER планує…" : "Створити й спланувати"}</button>
       </section>
+      {notice && <section style={{ ...panel, marginTop: 12, color: "#9af0bd" }}>{notice}</section>}
       {error && <section style={{ ...panel, marginTop: 12, color: "#ffaaa7" }}>{error}</section>}
       <section style={{ display: "grid", gap: 10, marginTop: 14 }}>
         {tasks.length === 0 && <div style={panel}>Поки немає задач.</div>}
