@@ -89,6 +89,24 @@ def system_status(principal: Principal = Depends(require_owner)) -> dict[str, An
             "status": "ready" if STORAGE_MODE == "postgres" else "degraded",
             "detail": "Owner actions recorded without raw secrets",
         },
+        {
+            "key": "local_models",
+            "label": "Local models",
+            "status": "waiting",
+            "detail": "Catalog ready; a separate owner-controlled GPU/CPU runtime is required",
+        },
+        {
+            "key": "browser",
+            "label": "Browser executor",
+            "status": "deferred",
+            "detail": "Deferred by owner; no browser side effects are enabled",
+        },
+        {
+            "key": "android",
+            "label": "Android executor",
+            "status": "deferred",
+            "detail": "Deferred by owner; no Android side effects are enabled",
+        },
     ]
 
     return {
