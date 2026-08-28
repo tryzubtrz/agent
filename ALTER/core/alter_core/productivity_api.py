@@ -126,7 +126,7 @@ def _memory_list(
         if key_prefix is not None and not item_key.startswith(key_prefix):
             continue
         result.append({"namespace": item_namespace, "key": item_key, "value": value})
-    return result[:limit]
+    return list(reversed(result))[:limit]
 
 
 def _memory_put(principal: Principal, namespace: str, key: str, value: Any) -> dict[str, Any]:

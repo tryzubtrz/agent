@@ -770,14 +770,18 @@ def test_task_inspector_filters_evidence_before_applying_limits(monkeypatch):
         (workspace_id, user_id, "task.plan", task["id"])
     ] = {"plan": "target plan", "provider": "test"}
     core_api._memory_fallback[
-        (workspace_id, user_id, "task.action_result", f"{task['id']}:attempt")
-    ] = {"execution_id": "attempt", "succeeded": True}
+        (workspace_id, user_id, "task.action_result", f"{task['id']}:attempt-1")
+    ] = {"execution_id": "attempt-1", "succeeded": False}
+    core_api._memory_fallback[
+        (workspace_id, user_id, "task.action_result", f"{task['id']}:attempt-2")
+    ] = {"execution_id": "attempt-2", "succeeded": True}
 
     inspector = client.get(f"/api/tasks/{task['id']}/inspector", headers=auth(token))
     assert inspector.status_code == 200
     assert inspector.json()["plan"]["plan"] == "target plan"
     assert inspector.json()["action_results"] == [
-        {"execution_id": "attempt", "succeeded": True}
+        {"execution_id": "attempt-2", "succeeded": True},
+        {"execution_id": "attempt-1", "succeeded": False},
     ]
 
 
