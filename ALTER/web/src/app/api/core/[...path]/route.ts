@@ -21,6 +21,7 @@ function can(member: MemberSession, path: string[], method: string): boolean {
   const top = path[0] || "";
   const route = path.join("/");
   const capabilities = new Set(member.capabilities);
+  if (route === "gateway/posthog/capture" && method === "POST") return true;
   if (["vault", "policies", "access", "gateway", "actions", "approvals", "settings"].includes(top)) return false;
   if (route.includes("/approve") || route.includes("/reject")) return false;
 
