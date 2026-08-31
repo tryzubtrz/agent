@@ -1,0 +1,36 @@
+{
+  "name": "ALTER Digital Twin",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "forwardPorts": [3000, 8000],
+  "portsAttributes": {
+    "3000": {
+      "label": "ALTER Web",
+      "onAutoForward": "notify"
+    },
+    "8000": {
+      "label": "ALTER Core",
+      "onAutoForward": "notify"
+    }
+  },
+  "postCreateCommand": "python -m pip install -e 'ALTER/core[dev]' && cd ALTER/web && npm install --no-package-lock && cd ../botpress && npm install --no-package-lock",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode"
+      ]
+    }
+  },
+  "remoteUser": "vscode"
+}
