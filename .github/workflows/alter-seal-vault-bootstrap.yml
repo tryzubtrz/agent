@@ -25,25 +25,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Verify source credential exists
+      - name: Detect optional Botpress source credential
+        id: source_credential
         env:
           BOTPRESS_RUNTIME_TOKEN: ${{ secrets.BOTPRESS_RUNTIME_TOKEN }}
         run: |
           if [ -z "$BOTPRESS_RUNTIME_TOKEN" ]; then
-            echo "BOTPRESS_RUNTIME_TOKEN (Bot Access Key) is not configured; sealing cannot continue."
-            exit 3
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "BOTPRESS_RUNTIME_TOKEN is not configured; optional Botpress sealing is skipped."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Checkout
+        if: steps.source_credential.outputs.configured == 'true'
         uses: actions/checkout@v4
 
       - name: Install crypto dependency
+        if: steps.source_credential.outputs.configured == 'true'
         run: python -m pip install --disable-pip-version-check 'cryptography>=43,<47'
 
       - name: Fetch ALTER public sealing key
+        if: steps.source_credential.outputs.configured == 'true'
         run: python ALTER/core/scripts/fetch_sealing_key.py
 
       - name: Seal Botpress credential
+        if: steps.source_credential.outputs.configured == 'true'
         env:
           BOTPRESS_RUNTIME_TOKEN: ${{ secrets.BOTPRESS_RUNTIME_TOKEN }}
         run: |
@@ -92,6 +99,7 @@ jobs:
           PY
 
       - name: Commit sealed envelope
+        if: steps.source_credential.outputs.configured == 'true'
         run: |
           if git diff --quiet -- ALTER/core/alter_core/bootstrap_vault.json && git ls-files --error-unmatch ALTER/core/alter_core/bootstrap_vault.json >/dev/null 2>&1; then
             echo "Sealed envelope is already current."
