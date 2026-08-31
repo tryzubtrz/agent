@@ -44,6 +44,7 @@ type Screen =
   | "tasks"
   | "rules"
   | "memory"
+  | "learning"
   | "audit"
   | "connectors"
   | "browser"
@@ -160,6 +161,7 @@ const modules: Module[] = [
   { id: "tasks", label: "Задачі", icon: ListChecks },
   { id: "connectors", label: "Конектори", icon: Link2 },
   { id: "memory", label: "Памʼять", icon: MemoryStick },
+  { id: "learning", label: "Навчання", icon: Sparkles },
   { id: "people", label: "Люди", icon: Users },
   { id: "settings", label: "Налаштування", icon: Settings },
 ];
@@ -449,6 +451,7 @@ export default function Page() {
         {screen === "tasks" && <TasksScreen tasks={tasks} />}
         {screen === "rules" && <RulesScreen rules={rules} refresh={refresh} />}
         {screen === "memory" && <MemoryScreen memory={memory} />}
+        {screen === "learning" && <LearningScreen />}
         {screen === "audit" && <AuditScreen events={audit} />}
         {screen === "connectors" && <ConnectorsScreen connectors={connectors} />}
         {screen === "browser" && <RuntimeScreen title="Браузер" icon={Globe2} capability={browserCapability} />}
@@ -549,6 +552,10 @@ function MemoryScreen({ memory }: { memory: MemoryItem[] }) {
   return <div className={styles.stack}>{groups.map(([label, key]) => { const items = memory.filter((item) => item.namespace.toLowerCase().includes(key)); return <section className={styles.panel} key={key}><div className={styles.sectionTitle}><span>{label}</span><StatusPill tone="violet">{items.length}</StatusPill></div>{items.slice(0, 8).map((item) => <div className={styles.memoryRow} key={`${item.namespace}:${item.key}`}><MemoryStick size={18} /><span><b>{item.key}</b><small>{typeof item.value === "string" ? item.value : JSON.stringify(item.value)}</small></span></div>)}{items.length === 0 && <div className={styles.empty}>У цьому шарі ще немає записів.</div>}</section>; })}</div>;
 }
 
+function LearningScreen() {
+  return <div className={styles.stack}><section className={styles.runtimeHero}><Sparkles size={28} /><div><b>Підтверджуване навчання</b><small>Кандидати з розмов, уроки після правок, контекстні тригери та редагований стиль — без самовільного запису фактів.</small></div><StatusPill tone="green">READY</StatusPill></section><section className={styles.panel}><div className={styles.sectionTitle}><span>Learning Center</span><span>Owner controlled</span></div><p className={styles.empty}>ALTER може мати власну аргументовану позицію, але персональні факти та звички приймає в довгострокову памʼять лише після твого підтвердження.</p><Link href="/learning" className={styles.primaryOutline} style={{ minHeight: 48, display: "flex", alignItems: "center", justifyContent: "center", textDecoration: "none", borderRadius: 14 }}>Відкрити центр навчання</Link></section></div>;
+}
+
 function AuditScreen({ events }: { events: AuditEvent[] }) {
   return <section className={styles.panel}><div className={styles.sectionTitle}><span>Хронологія</span><StatusPill tone="green">LIVE</StatusPill></div>{events.map((event) => <div className={styles.auditRow} key={event.id}><span className={styles.timelineDot} /><div><b>{event.event_type}</b><small>{event.actor_type} · {formatAgo(event.created_at)}</small></div><MoreHorizontal size={18} /></div>)}{events.length === 0 && <div className={styles.empty}>Журнал порожній.</div>}</section>;
 }
@@ -568,7 +575,7 @@ function ModelsScreen({ catalog, capability }: { catalog: ModelCatalog | null; c
 
 function VaultScreen({ capabilities }: { capabilities: Capability[] }) {
   const vault = capabilities.find((item) => item.key === "vault");
-  return <div className={styles.stack}><section className={styles.runtimeHero}><KeyRound size={28} /><div><b>Secrets Firewall</b><small>{vault?.evidence || "Стан Vault не отримано."}</small></div><StatusPill tone={vault?.status === "ready" ? "green" : "amber"}>{vault?.status || "unknown"}</StatusPill></section><section className={styles.panel}><div className={styles.sectionTitle}><span>Псевдоніми</span><span>Сирі значення приховані</span></div>{["vault:alter_api", "vault:database", "vault:openai_api", "vault:botpress_runtime", "vault:github_connector"].map((alias) => <div className={styles.secretRow} key={alias}><KeyRound size={18} /><span><b>{alias}</b><small>server-side alias</small></span><StatusPill tone="green">hidden</StatusPill></div>)}</section></div>;
+  return <div className={styles.stack}><section className={styles.runtimeHero}><KeyRound size={28} /><div><b>Secrets Firewall</b><small>{vault?.evidence || "Стан Vault не отримано."}</small></div><StatusPill tone={vault?.status === "ready" ? "green" : "amber"}>{vault?.status || "unknown"}</StatusPill></section><section className={styles.panel}><div className={styles.sectionTitle}><span>Псевдоніми</span><span>Сирі значення приховані</span></div>{["vault:alter_api", "vault:database", "vault:openai_api", "vault:local_model_runtime", "vault:botpress_runtime", "vault:github_connector"].map((alias) => <div className={styles.secretRow} key={alias}><KeyRound size={18} /><span><b>{alias}</b><small>server-side alias</small></span><StatusPill tone="green">hidden</StatusPill></div>)}</section></div>;
 }
 
 function PeopleScreen() {

@@ -15,6 +15,12 @@ from .api import (
 )
 from .auth import Principal, require_owner
 from .connector_gateway_api import test_connector
+from .local_model_catalog import installable_model_ids
+from .local_model_gateway import (
+    LocalModelGateway,
+    LocalModelRuntimeError,
+    LocalModelUnavailableError,
+)
 from .models import ActionRisk, PolicyEffect, Task, TaskStatus
 from .orchestrator import (
     ApprovalMismatchError,
@@ -59,7 +65,7 @@ def _safe_connector_output(connector: str, result: dict[str, Any]) -> dict[str, 
     return safe
 
 
-def _validate_supported_action(task: Task) -> tuple[str, str, UUID]:
+def _validate_supported_action(task: Task) -> tuple[str, str, str, UUID]:
     if task.status not in {TaskStatus.EXECUTING, TaskStatus.AWAITING_APPROVAL} or task.pending_action is None:
         raise HTTPException(
             status_code=409,
@@ -68,23 +74,23 @@ def _validate_supported_action(task: Task) -> tuple[str, str, UUID]:
     action = task.pending_action
     if action.attempt_id is None:
         raise HTTPException(status_code=409, detail="Active action has no bound execution attempt")
-    if action.category != "connector" or action.operation != "self_test":
-        raise HTTPException(
-            status_code=422,
-            detail="Runtime executor supports only connector/self_test actions in this release.",
-        )
-    if action.risk != ActionRisk.READ:
-        raise HTTPException(
-            status_code=422,
-            detail="Connector self-test executor accepts read-risk actions only.",
-        )
-    connector = (action.target or "").strip().lower()
-    if connector not in _SUPPORTED_CONNECTORS:
-        raise HTTPException(
-            status_code=422,
-            detail="Unsupported read-only connector target.",
-        )
-    return connector, action.digest(), action.attempt_id
+    target = (action.target or "").strip().lower()
+    if action.category == "connector" and action.operation == "self_test":
+        if action.risk != ActionRisk.READ:
+            raise HTTPException(status_code=422, detail="Connector self-test executor accepts read-risk actions only.")
+        if target not in _SUPPORTED_CONNECTORS:
+            raise HTTPException(status_code=422, detail="Unsupported read-only connector target.")
+        return "connector", target, action.digest(), action.attempt_id
+    if action.category == "model_install" and action.operation == "pull_allowlisted_model":
+        if action.risk != ActionRisk.REVERSIBLE:
+            raise HTTPException(status_code=422, detail="Model installation must be classified as reversible.")
+        if target not in installable_model_ids():
+            raise HTTPException(status_code=422, detail="Model is not in the ALTER installation allowlist.")
+        return "model_install", target, action.digest(), action.attempt_id
+    raise HTTPException(
+        status_code=422,
+        detail="Runtime executor does not support this action contract.",
+    )
 
 
 def _policy_preflight(
@@ -94,11 +100,12 @@ def _policy_preflight(
     expected_digest: str,
     approval_satisfied: bool,
 ) -> tuple[Task, PolicyEffect, str]:
-    """Lock task + latest policy snapshot immediately before read-only execution.
+    """Lock task + latest policy snapshot immediately before bounded execution.
 
-    The first executor intentionally supports read-only provider calls only. This
-    preflight therefore does not hold a database transaction open across a network
-    request. Future write executors require an execution lease/idempotency key.
+    Supported calls are either read-only connector tests or an allowlisted,
+    reversible model pull accepted by the owner runtime. The preflight does not
+    hold a database transaction open across a network request; the action digest
+    and attempt ID bind the result to the approved request.
     """
     outcome: dict[str, Any] = {}
 
@@ -202,13 +209,28 @@ def _run_connector_self_test(connector: ReadOnlyConnector, principal: Principal)
     return _safe_connector_output(connector, result)
 
 
+def _run_model_install(model_id: str, approval_digest: str) -> dict[str, Any]:
+    try:
+        result = LocalModelGateway().start_install(model_id=model_id, approval_digest=approval_digest)
+    except LocalModelUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="Owner model runtime is unavailable") from exc
+    except LocalModelRuntimeError as exc:
+        raise HTTPException(status_code=502, detail="Owner model runtime rejected the install job") from exc
+    allowed = {key: result[key] for key in ("job_id", "state", "model_id", "secret_exposed") if key in result}
+    if allowed.get("model_id") != model_id or allowed.get("secret_exposed") is not False:
+        raise HTTPException(status_code=502, detail="Model runtime returned unverifiable install evidence")
+    return allowed
+
+
 def _persist_executor_result(
     *,
     task: Task,
     principal: Principal,
     action_digest: str,
     attempt_id: UUID,
-    connector: str,
+    category: str,
+    operation: str,
+    target: str,
     succeeded: bool,
     summary: str,
     evidence: list[str],
@@ -219,8 +241,9 @@ def _persist_executor_result(
         "execution_id": execution_id,
         "attempt_id": str(attempt_id),
         "action_digest": action_digest,
-        "operation": "self_test",
-        "target": connector,
+        "category": category,
+        "operation": operation,
+        "target": target,
         "succeeded": succeeded,
         "result_summary": summary,
         "verification_evidence": evidence,
@@ -258,7 +281,8 @@ def _persist_executor_result(
             "action_digest": action_digest,
             "attempt_id": str(attempt_id),
             "execution_id": execution_id,
-            "connector": connector,
+            "category": category,
+            "target": target,
             "succeeded": succeeded,
             "verification_method": "tool_executor",
         },
@@ -273,13 +297,13 @@ def execute_pending_action(
     body: ExecutePendingBody | None = None,
     principal: Principal = Depends(require_owner),
 ) -> dict[str, Any]:
-    # External connector execution remains Owner-only in the first production
-    # release. Delegated execution can be added later with per-connector scopes.
+    # Connector checks and model pulls remain Owner-only. Delegated execution can
+    # be added later with explicit per-capability scopes.
     if principal.actor_role != "owner":
         raise HTTPException(status_code=403, detail="Only Owner can execute external connector actions")
 
     current = _owned_task(task_id, principal)
-    connector, action_digest, _attempt_id = _validate_supported_action(current)
+    category, target, action_digest, _attempt_id = _validate_supported_action(current)
     approval_digest = body.approval_digest if body is not None else None
     if approval_digest is not None and approval_digest != action_digest:
         raise HTTPException(status_code=409, detail="Execution approval does not match the active action.")
@@ -314,18 +338,31 @@ def execute_pending_action(
         if effect == PolicyEffect.DENY:
             raise HTTPException(status_code=409, detail=f"Current policy denies execution: {reason}")
 
-    connector, action_digest, attempt_id = _validate_supported_action(prepared)
+    category, target, action_digest, attempt_id = _validate_supported_action(prepared)
 
     try:
-        tool_output = _run_connector_self_test(connector, principal)  # type: ignore[arg-type]
-        if tool_output.get("ok") is not True:
+        if category == "connector":
+            tool_output = _run_connector_self_test(target, principal)  # type: ignore[arg-type]
+            operation = "self_test"
+            summary = f"{target} connector self-test succeeded."
+            evidence = [
+                f"connector={target}",
+                "provider_result_ok=true",
+                "secret_exposed=false",
+            ]
+        else:
+            tool_output = _run_model_install(target, action_digest)
+            operation = "pull_allowlisted_model"
+            summary = f"{target} model installation job was accepted by the owner runtime."
+            evidence = [
+                f"model_id={target}",
+                f"runtime_job_id={tool_output.get('job_id')}",
+                f"runtime_job_state={tool_output.get('state')}",
+                "allowlist_verified=true",
+                "secret_exposed=false",
+            ]
+        if category == "connector" and tool_output.get("ok") is not True:
             raise HTTPException(status_code=502, detail="Connector self-test did not return ok=true")
-        summary = f"{connector} connector self-test succeeded."
-        evidence = [
-            f"connector={connector}",
-            "provider_result_ok=true",
-            "secret_exposed=false",
-        ]
         if approval_recorded:
             evidence.append("policy_approval_recorded=true")
         updated, record = _persist_executor_result(
@@ -333,7 +370,9 @@ def execute_pending_action(
             principal=principal,
             action_digest=action_digest,
             attempt_id=attempt_id,
-            connector=connector,
+            category=category,
+            operation=operation,
+            target=target,
             succeeded=True,
             summary=summary,
             evidence=evidence,
@@ -343,9 +382,11 @@ def execute_pending_action(
         # Authentication/authorization/state/input errors are not provider outcomes.
         if exc.status_code in {401, 403, 409, 422}:
             raise
-        summary = f"{connector} connector self-test failed: {str(exc.detail)[:500]}"
+        operation = "self_test" if category == "connector" else "pull_allowlisted_model"
+        summary = f"{target} {category} execution failed: {str(exc.detail)[:500]}"
         evidence = [
-            f"connector={connector}",
+            f"category={category}",
+            f"target={target}",
             f"provider_error_status={exc.status_code}",
             "secret_exposed=false",
         ]
@@ -356,7 +397,9 @@ def execute_pending_action(
             principal=principal,
             action_digest=action_digest,
             attempt_id=attempt_id,
-            connector=connector,
+            category=category,
+            operation=operation,
+            target=target,
             succeeded=False,
             summary=summary,
             evidence=evidence,

@@ -44,12 +44,29 @@ export default function ApprovalCenter() {
     if (isOwner !== true) return;
     void refresh();
     const timer = window.setInterval(() => void refresh(), 15000);
-    return () => window.clearInterval(timer);
+    const changed = () => void refresh();
+    window.addEventListener("alter:approvals-changed", changed);
+    return () => { window.clearInterval(timer); window.removeEventListener("alter:approvals-changed", changed); };
   }, [isOwner, refresh]);
 
   async function decide(item: PendingApproval, decision: "approve" | "reject") {
     setBusy(item.task_id);
-    try { await request(`/approvals/${item.task_id}/${decision}`, { method: "POST", body: JSON.stringify({ action_digest: item.action_digest }) }); await refresh(); }
+    try {
+      const executable = ["connector", "model_install"].includes(item.action.category || "");
+      if (decision === "approve" && executable) {
+        await request(`/tasks/${item.task_id}/execute-pending`, {
+          method: "POST",
+          body: JSON.stringify({ approval_digest: item.action_digest }),
+        });
+      } else {
+        await request(`/approvals/${item.task_id}/${decision}`, {
+          method: "POST",
+          body: JSON.stringify({ action_digest: item.action_digest }),
+        });
+      }
+      window.dispatchEvent(new Event("alter:models-changed"));
+      await refresh();
+    }
     catch (err) { setError(err instanceof Error ? err.message : "Не вдалося зберегти рішення"); }
     finally { setBusy(null); }
   }

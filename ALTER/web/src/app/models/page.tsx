@@ -16,6 +16,8 @@ type Model = {
   policy_boundary: string;
   source: "cloud" | "local";
   install_state: "ready" | "credential_required" | "requires_local_runtime" | string;
+  installable?: boolean;
+  recommended?: boolean;
   license: string;
   requirements: string;
 };
@@ -24,6 +26,7 @@ type Catalog = {
   models: Model[];
   configured: number;
   local_runtime_connected: boolean;
+  local_runtime?: { configured: boolean; connected: boolean; installed: number; active_jobs: number; selected_model?: string | null };
   installation_policy: string;
 };
 
@@ -55,6 +58,8 @@ export default function ModelsPage() {
   const [routed, setRouted] = useState<Routed | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try { setCatalog(await core<Catalog>("/models/catalog")); setError(null); }
@@ -62,6 +67,11 @@ export default function ModelsPage() {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    const changed = () => void refresh();
+    window.addEventListener("alter:models-changed", changed);
+    return () => window.removeEventListener("alter:models-changed", changed);
+  }, [refresh]);
 
   const cloud = useMemo(() => catalog?.models.filter((model) => model.source === "cloud") ?? [], [catalog]);
   const local = useMemo(() => catalog?.models.filter((model) => model.source === "local") ?? [], [catalog]);
@@ -73,6 +83,20 @@ export default function ModelsPage() {
       setRouted(result); setError(null);
     } catch (err) { setError(err instanceof Error ? err.message : "Немає доступної моделі"); }
     finally { setBusy(false); }
+  }
+
+  async function requestInstall(model: Model) {
+    if (!catalog?.local_runtime_connected || !model.installable || installing) return;
+    setInstalling(model.id); setNotice(null); setError(null);
+    try {
+      const result = await core<{ already_installed: boolean; owner_approval_required?: boolean }>(`/models/${model.id}/install-request`, { method: "POST", body: "{}" });
+      setNotice(result.already_installed
+        ? `${model.display_name} вже встановлена.`
+        : `Запит для ${model.display_name} створено. Підтвердь картку схвалення — після цього runtime почне завантаження.`);
+      window.dispatchEvent(new Event("alter:approvals-changed"));
+      await refresh();
+    } catch (err) { setError(err instanceof Error ? err.message : "Не вдалося створити запит на встановлення"); }
+    finally { setInstalling(null); }
   }
 
   return (
@@ -88,6 +112,7 @@ export default function ModelsPage() {
       </section>
 
       {error && <section style={errorBox}>{error}</section>}
+      {notice && <section style={{ ...panel, borderColor: "rgba(93,224,154,.25)", color: "#b9f5cf", marginTop: 12 }}>{notice}</section>}
 
       <div style={stats}>
         <Stat value={catalog?.configured ?? "—"} label="підключено" />
@@ -101,14 +126,14 @@ export default function ModelsPage() {
       </section>
 
       <section style={{ ...panel, marginTop: 14 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}><HardDrive size={18} color="#ffd28b" /><strong>Локальний runtime не підключений</strong></div>
-        <p style={muted}>Vercel і телефон не можуть самі запустити ці ваги. Потрібен окремий компʼютер або GPU-сервер під контролем власника; далі — перевірка ліцензії, sandbox, benchmark і лише потім довіра моделі.</p>
-        <span style={{ ...badge, ...waiting }}><XCircle size={12} /> {catalog?.local_runtime_connected ? "Connected" : "Requires host"}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}><HardDrive size={18} color={catalog?.local_runtime_connected ? "#9af0bd" : "#ffd28b"} /><strong>{catalog?.local_runtime_connected ? "Owner runtime підключений" : "Локальний runtime не підключений"}</strong></div>
+        <p style={muted}>GitHub зберігає код і allowlist, а ваги — тільки на твоєму ПК/сервері або в Codespace. Кожне завантаження проходить окреме owner-схвалення; довільні назви моделей заблоковані.</p>
+        <span style={{ ...badge, ...(catalog?.local_runtime_connected ? good : waiting) }}>{catalog?.local_runtime_connected ? <CheckCircle2 size={12} /> : <XCircle size={12} />} {catalog?.local_runtime_connected ? `Connected · ${catalog.local_runtime?.installed || 0} installed` : "Requires host"}</span>
       </section>
 
       <SectionTitle icon={Cpu} title="10 локальних кандидатів" detail="Не встановлені. Показані реальні вимоги до обладнання та ліцензії." />
       <section style={list}>
-        {local.map((model) => <ModelCard key={model.id} model={model} />)}
+        {local.map((model) => <ModelCard key={model.id} model={model} onInstall={requestInstall} installing={installing === model.id} runtimeConnected={Boolean(catalog?.local_runtime_connected)} />)}
       </section>
 
       <section style={{ ...panel, marginTop: 16, display: "grid", gap: 10 }}>
@@ -133,7 +158,7 @@ function SectionTitle({ icon: Icon, title: text, detail }: { icon: typeof Brain;
   return <div style={sectionTitle}><Icon size={19} /><div><strong>{text}</strong><div style={muted}>{detail}</div></div></div>;
 }
 
-function ModelCard({ model }: { model: Model }) {
+function ModelCard({ model, onInstall, installing = false, runtimeConnected = false }: { model: Model; onInstall?: (model: Model) => void; installing?: boolean; runtimeConnected?: boolean }) {
   const ready = model.configured;
   return (
     <article style={panel}>
@@ -148,6 +173,11 @@ function ModelCard({ model }: { model: Model }) {
         <div><dt style={term}>Ліцензія</dt><dd style={definition}>{model.license}</dd></div>
         <div><dt style={term}>Межа</dt><dd style={definition}>{model.policy_boundary} · side effects: {model.side_effects ? "можливі" : "ні"}</dd></div>
       </dl>
+      {model.source === "local" && model.installable && !model.configured && onInstall && (
+        <button type="button" disabled={!runtimeConnected || installing} onClick={() => onInstall(model)} style={{ ...primary, width: "100%", marginTop: 12 }}>
+          {installing ? "Створюю захищений запит…" : runtimeConnected ? `Встановити${model.recommended ? " · рекомендовано" : ""}` : "Спочатку підключи runtime"}
+        </button>
+      )}
     </article>
   );
 }

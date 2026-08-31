@@ -1,0 +1,22 @@
+services:
+  ollama:
+    image: ollama/ollama:0.33.1
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+
+  alter-model-runtime:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      ALTER_MODEL_RUNTIME_TOKEN: ${ALTER_MODEL_RUNTIME_TOKEN:?Set ALTER_MODEL_RUNTIME_TOKEN in an untracked .env file}
+    ports:
+      - "8422:8422"
+
+volumes:
+  ollama-data:

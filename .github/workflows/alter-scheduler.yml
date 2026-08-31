@@ -49,7 +49,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run production Core-Vault-Botpress smoke
+      - name: Run production Core-Vault-Reasoning smoke
         if: github.event_name != 'schedule'
         run: |
           set -euo pipefail

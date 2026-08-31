@@ -9,9 +9,13 @@ Current implementation foundation includes:
 - Policy Menu / Rules before execution;
 - Vault aliases: models and prompts never receive raw secrets;
 - Profile / World / Episodes memory layers;
+- owner-confirmed learning candidates, lessons, triggers and editable response preferences;
+- evidence grounding from real tasks, rules, automations and system state before reasoning;
+- optional Deep evaluator pass, preferably through a second configured provider;
 - Tasks, approvals, audit events and artifacts;
 - isolated Browser and Android execution surfaces as planned executors;
 - model registry and routing foundation;
+- an owner-hosted Ollama model runtime with three exact allowlisted models and approval-gated downloads;
 - connectors with least-privilege scopes;
 - optional native iOS companion foundation;
 - Botpress ADK specialist with phone-only deployment through GitHub Actions.
@@ -22,6 +26,7 @@ Current implementation foundation includes:
 ALTER/
   botpress/        Botpress ADK specialist and cloud deployment
   core/            policy/orchestration API core
+  model_runtime/   allowlisted local-model download and inference service
   docs/            architecture and security model
   web/             PWA cockpit
   ios/             SwiftUI companion foundation
@@ -30,11 +35,27 @@ ALTER/
 ## Implementation phases
 
 1. Cockpit: chat, task state, modules, approvals, Rules, Vault status, Memory, Connectors.
-2. Agent core: persisted workflows, checkpoints, model routing and audit trail.
+2. Agent core: persisted workflows, confirmed learning, grounded reasoning, model routing and audit trail.
 3. Browser executor: isolated persistent browser profiles and live handoff.
 4. Android executor: isolated Android workspaces and live handoff.
 5. External connectors and local computer connector.
 6. Model marketplace, controlled upgrades, evaluation and rollback.
+
+## What “own opinion” means
+
+ALTER is instructed and tested to form an evidence-based conclusion, challenge
+weak or risky owner assumptions, separate verified facts from inference and
+avoid generic agreement. This is independent judgment in the product sense; it
+is not a claim of consciousness or human emotions.
+
+## Local models
+
+GitHub stores model-runtime code and the allowlist, not the weights. Ollama
+stores weights on the owner host. The initial allowlist is `qwen3:8b`,
+`deepseek-r1:14b` and `qwen2.5-coder:7b`. Every download is represented as an
+ALTER action, requires the exact owner approval digest, and is then queued on
+the owner runtime. A 4-core / 16 GB Codespace can run `qwen3:8b` for testing,
+but Codespaces sleep and are not a reliable 24/7 host.
 
 ## Non-negotiable security properties
 
@@ -48,4 +69,7 @@ ALTER/
 
 ## Botpress status
 
-ALTER now lives in the private `tryzubtrz/agent` repository on `main`. GitHub Actions secret `BOTPRESS_PAT` has been presence-checked without exposing its value. The Botpress deployment workflow targets workspace `wkspace_01M0XTFXYMFEDGHEEKT710G22P` and bot `64f3490a-183a-47c5-b825-97210771822f`.
+ALTER lives in `tryzubtrz/agent` on `main`. The repository is public, while
+deployment credentials remain in GitHub/Vercel secrets and ALTER Vault. The
+Botpress deployment workflow targets the configured ALTER workspace and bot;
+runtime code never prints its credential.

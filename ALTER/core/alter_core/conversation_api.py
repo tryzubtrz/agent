@@ -8,6 +8,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from .agent_grounding import collect_agent_grounding
 from .api import _audit, _memory_fallback, memory_store
 from .auth import Principal, require_owner
 from .botpress_contract import (
@@ -19,16 +20,25 @@ from .botpress_gateway import (
     BotpressRuntimeError,
     BotpressUnavailableError,
 )
+from .learning_api import queue_learning_candidates
+from .local_model_gateway import LocalModelRuntimeError, LocalModelUnavailableError
 from .memory_safety import is_rag_excluded_namespace
-from .openai_agents_gateway import OpenAIAgentsRuntimeError, OpenAIAgentsUnavailableError
+from .openai_agents_gateway import (
+    OpenAIAgentsRuntimeError,
+    OpenAIAgentsUnavailableError,
+)
 from .reasoning_gateway import ReasoningGateway
 from .secret_safety import redact_secrets
 
 router = APIRouter()
 gateway = ReasoningGateway()
 
-_UNAVAILABLE_ERRORS = (BotpressUnavailableError, OpenAIAgentsUnavailableError)
-_RUNTIME_ERRORS = (BotpressRuntimeError, OpenAIAgentsRuntimeError)
+_UNAVAILABLE_ERRORS = (
+    BotpressUnavailableError,
+    OpenAIAgentsUnavailableError,
+    LocalModelUnavailableError,
+)
+_RUNTIME_ERRORS = (BotpressRuntimeError, OpenAIAgentsRuntimeError, LocalModelRuntimeError)
 
 
 def _provider_name() -> str:
@@ -175,7 +185,8 @@ def respond_in_conversation(body: ChatBody, principal: Principal = Depends(requi
     knowledge = _rag(principal, safe_owner_text)
     history = _context(existing)
     rag_context = _rag_context(knowledge)
-    context = "\n\n".join(part for part in (history, rag_context) if part)
+    grounding_context, grounding_evidence = collect_agent_grounding(principal, safe_owner_text)
+    context = "\n\n".join(part for part in (history, rag_context, grounding_context) if part)
 
     try:
         output = gateway.think(objective=safe_owner_text, context=context, mode=body.mode)
@@ -189,19 +200,45 @@ def respond_in_conversation(body: ChatBody, principal: Principal = Depends(requi
     except BotpressContractError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    reviewed = False
+    reviewer_provider: str | None = None
+    if body.mode == "deep":
+        review_method = getattr(gateway, "review", None)
+        if callable(review_method):
+            try:
+                reviewed_output = review_method(
+                    objective=safe_owner_text,
+                    draft=response,
+                    context=context,
+                )
+                response = validate_specialist_output(reviewed_output)
+                raw_reviewer = reviewed_output.get("reviewerProvider")
+                reviewer_provider = raw_reviewer if isinstance(raw_reviewer, str) else None
+                reviewed = True
+            except (*_UNAVAILABLE_ERRORS, *_RUNTIME_ERRORS, BotpressContractError):
+                reviewed = False
+
     owner_message = {"role": "user", "text": safe_owner_text, "created_at": datetime.now(timezone.utc).isoformat(), "redacted": owner_redacted}
     safe_response, response_redacted = _redact(response)
     agent_message = {"role": "agent", "text": safe_response, "created_at": datetime.now(timezone.utc).isoformat(), "redacted": response_redacted}
     updated = [*existing, owner_message, agent_message][-_MAX_MESSAGES:]
     _save_messages(principal, updated)
+    try:
+        learning_candidates = queue_learning_candidates(principal, safe_owner_text)
+    except Exception:  # noqa: BLE001 - chat remains available if optional learning persistence fails
+        learning_candidates = []
     provider = _provider_name()
-    _audit(principal, event_type="conversation.responded", payload={"provider": provider, "message_count": len(updated), "owner_message_redacted": owner_redacted, "agent_message_redacted": response_redacted, "boundary": REQUIRED_SPECIALIST_BOUNDARY, "rag_hits": len(knowledge)})
+    _audit(principal, event_type="conversation.responded", payload={"provider": provider, "message_count": len(updated), "owner_message_redacted": owner_redacted, "agent_message_redacted": response_redacted, "boundary": REQUIRED_SPECIALIST_BOUNDARY, "rag_hits": len(knowledge), "grounded_tools": [item.get("tool") for item in grounding_evidence], "reviewed": reviewed, "reviewer_provider": reviewer_provider, "learning_candidates": len(learning_candidates)})
 
     return {
         "provider": provider, "user": owner_message, "agent": agent_message, "persistent": True,
         "side_effects_performed": False, "boundary": REQUIRED_SPECIALIST_BOUNDARY,
         "knowledge_hits": [{"namespace": item["namespace"], "key": item["key"], "score": item["score"]} for item in knowledge],
         "retrieval_engine": "secret-safe-lexical-rag-v1",
+        "grounding": grounding_evidence,
+        "reviewed": reviewed,
+        "reviewer_provider": reviewer_provider,
+        "learning_candidates": len(learning_candidates),
     }
 
 

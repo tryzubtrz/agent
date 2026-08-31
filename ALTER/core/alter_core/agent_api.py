@@ -7,7 +7,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .api import _audit, _commit_task_transition_with_record, _get_owned_task, orchestrator
+from .agent_grounding import collect_agent_grounding
+from .api import (
+    _audit,
+    _commit_task_transition_with_record,
+    _get_owned_task,
+    orchestrator,
+)
 from .auth import Principal, require_owner
 from .botpress_contract import (
     BotpressContractError,
@@ -18,20 +24,25 @@ from .botpress_gateway import (
     BotpressRuntimeError,
     BotpressUnavailableError,
 )
+from .local_model_gateway import LocalModelRuntimeError, LocalModelUnavailableError
 from .models import TaskStatus
-from .orchestrator import InvalidTaskTransitionError
 from .openai_agents_gateway import (
     OpenAIAgentsRuntimeError,
     OpenAIAgentsUnavailableError,
 )
+from .orchestrator import InvalidTaskTransitionError
 from .reasoning_gateway import ReasoningGateway
 from .secret_safety import redact_secrets
 
 router = APIRouter()
 gateway = ReasoningGateway()
 
-_UNAVAILABLE_ERRORS = (BotpressUnavailableError, OpenAIAgentsUnavailableError)
-_RUNTIME_ERRORS = (BotpressRuntimeError, OpenAIAgentsRuntimeError)
+_UNAVAILABLE_ERRORS = (
+    BotpressUnavailableError,
+    OpenAIAgentsUnavailableError,
+    LocalModelUnavailableError,
+)
+_RUNTIME_ERRORS = (BotpressRuntimeError, OpenAIAgentsRuntimeError, LocalModelRuntimeError)
 
 
 def _provider_name() -> str:
@@ -101,6 +112,9 @@ def agent_think(
 ) -> dict[str, object]:
     safe_objective, objective_redacted = redact_secrets(body.objective)
     safe_context, context_redacted = redact_secrets(body.context)
+    grounding_context, grounding_evidence = collect_agent_grounding(principal, safe_objective)
+    if grounding_context:
+        safe_context = "\n\n".join(part for part in (safe_context, grounding_context) if part)
     try:
         output = gateway.think(
             objective=safe_objective,
@@ -135,6 +149,26 @@ def agent_think(
     except BotpressContractError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    reviewed = False
+    reviewer_provider: str | None = None
+    if body.mode == "deep":
+        review_method = getattr(gateway, "review", None)
+        if callable(review_method):
+            try:
+                reviewed_output = review_method(
+                    objective=safe_objective,
+                    draft=response,
+                    context=safe_context,
+                )
+                response = validate_specialist_output(reviewed_output)
+                raw_reviewer = reviewed_output.get("reviewerProvider")
+                reviewer_provider = raw_reviewer if isinstance(raw_reviewer, str) else None
+                reviewed = True
+            except (*_UNAVAILABLE_ERRORS, *_RUNTIME_ERRORS, BotpressContractError):
+                # A critic is an optional quality pass; the validated primary
+                # response remains the safe fallback.
+                reviewed = False
+
     safe_response, response_redacted = redact_secrets(response)
     redacted = (
         objective_redacted
@@ -150,6 +184,9 @@ def agent_think(
             "mode": body.mode,
             "redacted": redacted,
             "recovered_internal_leak": recovered_internal_leak,
+            "grounded_tools": [item.get("tool") for item in grounding_evidence],
+            "reviewed": reviewed,
+            "reviewer_provider": reviewer_provider,
             "boundary": "core-policy-required",
         },
     )
@@ -161,6 +198,9 @@ def agent_think(
         "boundary": "core-policy-required",
         "redacted": redacted,
         "recovered_internal_leak": recovered_internal_leak,
+        "grounding": grounding_evidence,
+        "reviewed": reviewed,
+        "reviewer_provider": reviewer_provider,
     }
 
 
