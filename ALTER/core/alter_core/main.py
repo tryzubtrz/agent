@@ -9,6 +9,7 @@ from .access_api import router as access_router
 from .agent_api import router as agent_router
 from .approval_api import router as approval_router
 from .automation_tick_api import router as automation_tick_router
+from .capability_api import router as capability_router
 from .connector_gateway_api import router as connector_gateway_router
 from .conversation_api import router as conversation_router
 from .document_api import router as document_router
@@ -31,6 +32,7 @@ for router in (
     agent_router,
     approval_router,
     automation_tick_router,
+    capability_router,
     connector_gateway_router,
     conversation_router,
     document_router,
