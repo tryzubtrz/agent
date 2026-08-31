@@ -16,10 +16,11 @@ _FIXED_ALIASES = {
     "vault:core_api": ("ALTER_API_TOKEN", "core-auth", False),
     "vault:database": ("DATABASE_URL", "database", False),
     "vault:botpress_runtime": ("BOTPRESS_RUNTIME_TOKEN", "ai-runtime", True),
+    "vault:openai_api": ("OPENAI_API_KEY", "openai-agents-sdk", True),
     "vault:runway": ("RUNWAYML_API_SECRET", "media-generation", True),
     "vault:owner_web_pin": ("ALTER_WEB_PIN", "owner-auth", False),
 }
-_OWNER_WRITABLE = {"vault:botpress_runtime", "vault:runway"}
+_OWNER_WRITABLE = {"vault:botpress_runtime", "vault:openai_api", "vault:runway"}
 
 
 class SecretWriteBody(BaseModel):

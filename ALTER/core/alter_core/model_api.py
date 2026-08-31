@@ -7,9 +7,11 @@ from pydantic import BaseModel
 
 from .auth import Principal, require_owner
 from .botpress_gateway import BotpressGateway
+from .openai_agents_gateway import OpenAIAgentsGateway
 
 router = APIRouter()
 gateway = BotpressGateway()
+openai_gateway = OpenAIAgentsGateway()
 
 Purpose = Literal[
     "chat", "reasoning", "planning", "summarization", "coding",
@@ -99,7 +101,23 @@ _LOCAL_CATALOG: tuple[dict[str, Any], ...] = (
 
 def _registry() -> list[dict[str, Any]]:
     status = gateway.status()
+    openai_status = openai_gateway.status()
     live: list[dict[str, Any]] = [
+        {
+            "id": f"openai-{openai_status.model}",
+            "provider": openai_status.provider,
+            "display_name": f"ALTER · {openai_status.model}",
+            "capabilities": ["chat", "reasoning", "planning", "summarization", "coding"],
+            "configured": openai_status.configured,
+            "credential_configured": openai_status.credential_configured,
+            "action": openai_status.action,
+            "side_effects": False,
+            "policy_boundary": "core-policy-required",
+            "source": "cloud",
+            "install_state": "ready" if openai_status.configured else "credential_required",
+            "license": "service",
+            "requirements": "OpenAI API key in vault:openai_api or server runtime",
+        },
         {
             "id": "botpress-alter-think",
             "provider": "botpress",

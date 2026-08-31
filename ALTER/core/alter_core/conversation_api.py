@@ -16,15 +16,26 @@ from .botpress_contract import (
     validate_specialist_output,
 )
 from .botpress_gateway import (
-    BotpressGateway,
     BotpressRuntimeError,
     BotpressUnavailableError,
 )
 from .memory_safety import is_rag_excluded_namespace
+from .openai_agents_gateway import OpenAIAgentsRuntimeError, OpenAIAgentsUnavailableError
+from .reasoning_gateway import ReasoningGateway
 from .secret_safety import redact_secrets
 
 router = APIRouter()
-gateway = BotpressGateway()
+gateway = ReasoningGateway()
+
+_UNAVAILABLE_ERRORS = (BotpressUnavailableError, OpenAIAgentsUnavailableError)
+_RUNTIME_ERRORS = (BotpressRuntimeError, OpenAIAgentsRuntimeError)
+
+
+def _provider_name() -> str:
+    status_method = getattr(gateway, "status", None)
+    if not callable(status_method):
+        return "botpress"
+    return str(getattr(status_method(), "provider", "botpress"))
 
 _MAX_MESSAGES = 60
 _CONTEXT_MESSAGES = 16
@@ -168,9 +179,9 @@ def respond_in_conversation(body: ChatBody, principal: Principal = Depends(requi
 
     try:
         output = gateway.think(objective=safe_owner_text, context=context, mode=body.mode)
-    except BotpressUnavailableError as exc:
+    except _UNAVAILABLE_ERRORS as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except BotpressRuntimeError as exc:
+    except _RUNTIME_ERRORS as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
@@ -183,10 +194,11 @@ def respond_in_conversation(body: ChatBody, principal: Principal = Depends(requi
     agent_message = {"role": "agent", "text": safe_response, "created_at": datetime.now(timezone.utc).isoformat(), "redacted": response_redacted}
     updated = [*existing, owner_message, agent_message][-_MAX_MESSAGES:]
     _save_messages(principal, updated)
-    _audit(principal, event_type="conversation.responded", payload={"provider": "botpress", "message_count": len(updated), "owner_message_redacted": owner_redacted, "agent_message_redacted": response_redacted, "boundary": REQUIRED_SPECIALIST_BOUNDARY, "rag_hits": len(knowledge)})
+    provider = _provider_name()
+    _audit(principal, event_type="conversation.responded", payload={"provider": provider, "message_count": len(updated), "owner_message_redacted": owner_redacted, "agent_message_redacted": response_redacted, "boundary": REQUIRED_SPECIALIST_BOUNDARY, "rag_hits": len(knowledge)})
 
     return {
-        "provider": "botpress", "user": owner_message, "agent": agent_message, "persistent": True,
+        "provider": provider, "user": owner_message, "agent": agent_message, "persistent": True,
         "side_effects_performed": False, "boundary": REQUIRED_SPECIALIST_BOUNDARY,
         "knowledge_hits": [{"namespace": item["namespace"], "key": item["key"], "score": item["score"]} for item in knowledge],
         "retrieval_engine": "secret-safe-lexical-rag-v1",

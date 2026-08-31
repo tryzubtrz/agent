@@ -15,16 +15,30 @@ from .botpress_contract import (
     validate_specialist_output,
 )
 from .botpress_gateway import (
-    BotpressGateway,
     BotpressRuntimeError,
     BotpressUnavailableError,
 )
 from .models import TaskStatus
 from .orchestrator import InvalidTaskTransitionError
+from .openai_agents_gateway import (
+    OpenAIAgentsRuntimeError,
+    OpenAIAgentsUnavailableError,
+)
+from .reasoning_gateway import ReasoningGateway
 from .secret_safety import redact_secrets
 
 router = APIRouter()
-gateway = BotpressGateway()
+gateway = ReasoningGateway()
+
+_UNAVAILABLE_ERRORS = (BotpressUnavailableError, OpenAIAgentsUnavailableError)
+_RUNTIME_ERRORS = (BotpressRuntimeError, OpenAIAgentsRuntimeError)
+
+
+def _provider_name() -> str:
+    status_method = getattr(gateway, "status", None)
+    if not callable(status_method):
+        return "botpress"
+    return str(getattr(status_method(), "provider", "botpress"))
 
 
 class ThinkBody(BaseModel):
@@ -68,11 +82,13 @@ def _repair_internal_chat_output(*, objective: str, draft: str) -> tuple[str, bo
 def agent_status(_principal: Principal = Depends(require_owner)) -> dict[str, object]:
     status = gateway.status()
     return {
-        "provider": "botpress",
+        "provider": status.provider,
         "configured": status.configured,
         "bot_id_configured": status.bot_id_configured,
         "credential_configured": status.credential_configured,
         "action": status.action,
+        "model": status.model,
+        "available_providers": list(status.available_providers),
         "side_effect_boundary": "core-policy-required",
     }
 
@@ -91,9 +107,9 @@ def agent_think(
             context=safe_context,
             mode=body.mode,
         )
-    except BotpressUnavailableError as exc:
+    except _UNAVAILABLE_ERRORS as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except BotpressRuntimeError as exc:
+    except _RUNTIME_ERRORS as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     recovered_internal_leak = False
@@ -109,9 +125,9 @@ def agent_think(
                 objective=safe_objective,
                 draft=draft,
             )
-        except BotpressUnavailableError as exc:
+        except _UNAVAILABLE_ERRORS as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except (BotpressRuntimeError, BotpressContractError) as exc:
+        except (*_RUNTIME_ERRORS, BotpressContractError) as exc:
             raise HTTPException(
                 status_code=502,
                 detail="ALTER blocked an internal reasoning leak and could not safely repair the response.",
@@ -130,7 +146,7 @@ def agent_think(
         principal,
         event_type="agent.thought",
         payload={
-            "provider": "botpress",
+            "provider": _provider_name(),
             "mode": body.mode,
             "redacted": redacted,
             "recovered_internal_leak": recovered_internal_leak,
@@ -139,7 +155,7 @@ def agent_think(
     )
 
     return {
-        "provider": "botpress",
+        "provider": _provider_name(),
         "response": safe_response,
         "side_effects_performed": False,
         "boundary": "core-policy-required",
@@ -182,9 +198,9 @@ def plan_task(
             context=safe_context,
             mode=body.mode,
         )
-    except BotpressUnavailableError as exc:
+    except _UNAVAILABLE_ERRORS as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except BotpressRuntimeError as exc:
+    except _RUNTIME_ERRORS as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
@@ -195,7 +211,7 @@ def plan_task(
     safe_plan, plan_redacted = redact_secrets(response)
     plan_record = {
         "plan": safe_plan,
-        "provider": "botpress",
+        "provider": _provider_name(),
         "mode": body.mode,
         "boundary": "core-policy-required",
         "side_effects_performed": False,
@@ -217,7 +233,7 @@ def plan_task(
         event_type="task.planned",
         task_id=task.id,
         payload={
-            "provider": "botpress",
+            "provider": _provider_name(),
             "mode": body.mode,
             "redacted": objective_redacted or context_redacted or plan_redacted,
             "boundary": "core-policy-required",
