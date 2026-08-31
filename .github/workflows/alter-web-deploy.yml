@@ -1,4 +1,4 @@
-name: ALTER Vercel Force Deploy
+name: ALTER Web Deploy
 
 on:
   workflow_dispatch:
@@ -6,30 +6,30 @@ on:
     branches:
       - main
     paths:
-      - 'ALTER/core/.vercel-force-deploy'
+      - 'ALTER/web/**'
 
 permissions:
   contents: read
 
 concurrency:
-  group: alter-core-vercel-production
+  group: alter-web-vercel-production
   cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     env:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-      VERCEL_PROJECT_ID: prj_1Zqum253Ac7DPRLMBV4U56HERp0W
-      VERCEL_ORG_ID: team_gJ5e2cC36eMxaFiQTVL7LKGd
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_WEB_PROJECT_ID }}
     steps:
       - name: Check Vercel token
         run: |
           if [ -z "$VERCEL_TOKEN" ]; then
-            echo "::warning::VERCEL_TOKEN is not set in GitHub Actions Secrets."
-            echo "To fix: go to your repo → Settings → Secrets and variables → Actions → New repository secret"
-            echo "Name: VERCEL_TOKEN  |  Value: your Vercel token from https://vercel.com/account/tokens"
+            echo "::warning::VERCEL_TOKEN is not set."
+            echo "Fix: Settings → Secrets → Actions → New secret: VERCEL_TOKEN"
+            echo "Get your token at: https://vercel.com/account/tokens"
             exit 1
           fi
 
@@ -40,26 +40,28 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: ALTER/web/package-lock.json
 
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
-      - name: Link ALTER Core project
-        working-directory: ALTER/core
-        run: vercel link --yes --project alter-app --scope vadym-tokaryk --token "$VERCEL_TOKEN"
+      - name: Link ALTER Web project
+        working-directory: ALTER/web
+        run: vercel link --yes --token "$VERCEL_TOKEN"
 
       - name: Pull production environment
-        working-directory: ALTER/core
+        working-directory: ALTER/web
         run: vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
 
       - name: Build production output
-        working-directory: ALTER/core
+        working-directory: ALTER/web
         run: vercel build --prod --token "$VERCEL_TOKEN"
 
-      - name: Deploy production output
+      - name: Deploy to production
         id: deploy
-        working-directory: ALTER/core
+        working-directory: ALTER/web
         run: |
           url=$(vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN")
           echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "✅ ALTER Core deployed: $url"
+          echo "✅ ALTER Web deployed: $url"
