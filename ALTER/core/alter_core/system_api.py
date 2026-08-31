@@ -8,11 +8,11 @@ from fastapi import APIRouter, Depends
 
 from .api import STORAGE_MODE, connector_store, task_store
 from .auth import Principal, require_owner
-from .botpress_gateway import BotpressGateway
 from .models import TaskStatus
+from .reasoning_gateway import ReasoningGateway
 
 router = APIRouter()
-gateway = BotpressGateway()
+gateway = ReasoningGateway()
 
 
 @router.get("/system/status")
@@ -36,6 +36,7 @@ def system_status(principal: Principal = Depends(require_owner)) -> dict[str, An
         "ALTER_API_TOKEN",
         "DATABASE_URL",
         "BOTPRESS_RUNTIME_TOKEN",
+        "OPENAI_API_KEY",
         "ALTER_WEB_PIN",
     )
     vault_configured = sum(1 for name in vault_envs if os.getenv(name, "").strip())
@@ -63,7 +64,7 @@ def system_status(principal: Principal = Depends(require_owner)) -> dict[str, An
             "key": "agent",
             "label": "ALTER AI specialist",
             "status": "ready" if agent.configured else "waiting",
-            "detail": "Botpress alterThink" if agent.configured else "Runtime credential required",
+            "detail": f"{agent.provider} · {agent.model or agent.action}" if agent.configured else "Runtime credential required",
         },
         {
             "key": "policy",
@@ -118,11 +119,13 @@ def system_status(principal: Principal = Depends(require_owner)) -> dict[str, An
             "awaiting_approval": len(pending_approvals),
         },
         "agent": {
-            "provider": "botpress",
+            "provider": agent.provider,
             "configured": agent.configured,
             "credential_configured": agent.credential_configured,
             "bot_id_configured": agent.bot_id_configured,
             "action": agent.action,
+            "model": agent.model,
+            "available_providers": list(agent.available_providers),
         },
         "connectors": {
             "total": len(connectors),

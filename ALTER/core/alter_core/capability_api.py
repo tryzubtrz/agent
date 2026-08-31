@@ -7,10 +7,10 @@ from fastapi import APIRouter, Depends
 
 from .api import STORAGE_MODE, connector_store, task_store
 from .auth import Principal, require_owner
-from .botpress_gateway import BotpressGateway
+from .reasoning_gateway import ReasoningGateway
 
 router = APIRouter()
-gateway = BotpressGateway()
+gateway = ReasoningGateway()
 
 
 def _capability(
@@ -43,6 +43,7 @@ def _catalog(principal: Principal) -> list[dict[str, Any]]:
         "ALTER_API_TOKEN",
         "DATABASE_URL",
         "BOTPRESS_RUNTIME_TOKEN",
+        "OPENAI_API_KEY",
         "ALTER_WEB_PIN",
     )
     vault_configured = sum(1 for name in vault_envs if os.getenv(name, "").strip())
@@ -74,7 +75,7 @@ def _catalog(principal: Principal) -> list[dict[str, Any]]:
         _capability(23, "audit_timeline", "Task audit timeline", "ready" if storage_ready else "degraded", f"Audit events are persisted through the configured {STORAGE_MODE} storage boundary."),
         _capability(24, "checkpoints", "Checkpoints & rollback", "planned", "Git revisions exist externally, but task-level atomic runtime checkpoints are not exposed as a verified capability."),
         _capability(25, "scheduler", "Cron Scheduler", "ready" if storage_ready else "degraded", "Scheduler and automation tick routers are mounted."),
-        _capability(26, "fact_check", "Багатоджерельний фактчекінг", "partial", "Reasoning + connector architecture exists; mandatory multi-source retrieval is not enforced for every answer."),
+        _capability(26, "fact_check", "Багатоджерельний фактчекінг", "partial", f"Reasoning provider is {agent.provider}; mandatory multi-source retrieval is not enforced for every answer."),
         _capability(27, "ocr", "OCR & document structuring", "partial", "Document pipeline exists and OCR candidates are catalogued; dedicated local OCR runtime is not verified."),
         _capability(28, "market", "Market Sandbox", "partial", "Market API is mounted; automatic install/test/trust lifecycle for arbitrary plugins is not complete."),
         _capability(29, "hard_stop", "Emergency Hard-Stop", "planned", "No global verified kill-switch endpoint currently owns all remote workers/sessions."),
@@ -95,6 +96,7 @@ def system_capabilities(principal: Principal = Depends(require_owner)) -> dict[s
         "spec_version": "1.0",
         "runtime_truth_contract": True,
         "agent_configured": gateway.status().configured,
+        "agent_provider": gateway.status().provider,
         "storage": STORAGE_MODE,
         "counts": counts,
         "capabilities": capabilities,
