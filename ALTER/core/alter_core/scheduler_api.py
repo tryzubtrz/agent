@@ -15,9 +15,15 @@ from fastapi import APIRouter, Header, HTTPException
 from .auth import system_principal
 from .automation_tick_api import tick_automations
 from .botpress_contract import BotpressContractError, validate_specialist_output
-from .botpress_gateway import BotpressGateway, BotpressRuntimeError, BotpressUnavailableError
+from .botpress_gateway import BotpressRuntimeError, BotpressUnavailableError
 from .connector_gateway_api import capture_posthog_system_event
+from .local_model_gateway import LocalModelRuntimeError, LocalModelUnavailableError
+from .openai_agents_gateway import (
+    OpenAIAgentsRuntimeError,
+    OpenAIAgentsUnavailableError,
+)
 from .rag_engine import retrieve_rows
+from .reasoning_gateway import ReasoningGateway
 
 router = APIRouter()
 
@@ -109,7 +115,7 @@ def github_scheduler_tick(authorization: str | None = Header(default=None, alias
     claims = _claims_from_authorization(authorization)
     principal = system_principal("github-actions-scheduler")
     result = tick_automations(principal)
-    agent_status = BotpressGateway().status()
+    agent_status = ReasoningGateway().status()
     telemetry_state = "accepted"
     try:
         capture_posthog_system_event(
@@ -127,6 +133,7 @@ def github_scheduler_tick(authorization: str | None = Header(default=None, alias
         "run_id": claims.get("run_id"),
         "static_scheduler_secret": False,
         "agent_configured": agent_status.configured,
+        "agent_provider": agent_status.provider,
         "agent_action": agent_status.action,
         "telemetry": telemetry_state,
         "secret_exposed": False,
@@ -148,10 +155,10 @@ def github_production_smoke(authorization: str | None = Header(default=None, ali
     if not rag_ok:
         raise HTTPException(status_code=500, detail="Secret-safe RAG smoke failed")
 
-    gateway = BotpressGateway()
+    gateway = ReasoningGateway()
     status = gateway.status()
     if not status.configured:
-        raise HTTPException(status_code=503, detail="Botpress runtime credential is not configured in ALTER Vault")
+        raise HTTPException(status_code=503, detail="No ALTER reasoning runtime is configured")
     try:
         output = gateway.think(
             objective="Reply with a brief confirmation that ALTER specialist reasoning is online. Do not perform or claim any side effect.",
@@ -159,16 +166,17 @@ def github_production_smoke(authorization: str | None = Header(default=None, ali
             mode="quick",
         )
         response = validate_specialist_output(output)
-    except BotpressUnavailableError as exc:
-        raise HTTPException(status_code=503, detail="Botpress specialist is unavailable") from exc
-    except (BotpressRuntimeError, BotpressContractError) as exc:
-        raise HTTPException(status_code=502, detail="Botpress specialist production smoke failed") from exc
+    except (BotpressUnavailableError, OpenAIAgentsUnavailableError, LocalModelUnavailableError) as exc:
+        raise HTTPException(status_code=503, detail="ALTER reasoning runtime is unavailable") from exc
+    except (BotpressRuntimeError, OpenAIAgentsRuntimeError, LocalModelRuntimeError, BotpressContractError) as exc:
+        raise HTTPException(status_code=502, detail="ALTER reasoning production smoke failed") from exc
 
     telemetry = capture_posthog_system_event(
         "alter_system_check",
         {
             "source": "production_smoke",
-            "botpress_ok": True,
+            "reasoning_ok": True,
+            "provider": status.provider,
             "rag_ok": True,
             "secret_exposed": False,
         },
@@ -181,9 +189,11 @@ def github_production_smoke(authorization: str | None = Header(default=None, ali
         "scheduler_oidc": True,
         "repository": claims.get("repository"),
         "run_id": claims.get("run_id"),
-        "botpress": {
+        "reasoning": {
             "configured": True,
             "contract_ok": True,
+            "provider": status.provider,
+            "model": status.model,
             "action": status.action,
             "boundary": output.get("boundary"),
             "side_effects_performed": output.get("sideEffectsPerformed"),

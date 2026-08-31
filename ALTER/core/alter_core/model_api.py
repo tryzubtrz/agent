@@ -5,13 +5,19 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from .api import _audit, orchestrator, policy_store
 from .auth import Principal, require_owner
 from .botpress_gateway import BotpressGateway
+from .local_model_catalog import LOCAL_MODEL_CATALOG, get_local_model
+from .local_model_gateway import LocalModelGateway
+from .models import ActionRequest, ActionRisk, TaskStatus
 from .openai_agents_gateway import OpenAIAgentsGateway
+from .orchestrator import InvalidTaskTransitionError
 
 router = APIRouter()
 gateway = BotpressGateway()
 openai_gateway = OpenAIAgentsGateway()
+local_gateway = LocalModelGateway()
 
 Purpose = Literal[
     "chat", "reasoning", "planning", "summarization", "coding",
@@ -25,83 +31,10 @@ class RouteModelBody(BaseModel):
     mode: Literal["quick", "normal", "deep", "plan"] = "normal"
 
 
-_LOCAL_CATALOG: tuple[dict[str, Any], ...] = (
-    {
-        "id": "qwen3-8b",
-        "display_name": "Qwen3-8B",
-        "capabilities": ["chat", "reasoning", "planning", "summarization"],
-        "license": "Apache-2.0",
-        "requirements": "16 GB RAM or ~8 GB VRAM for a practical Q4 setup",
-    },
-    {
-        "id": "deepseek-r1-distill-qwen-14b",
-        "display_name": "DeepSeek-R1-Distill-Qwen-14B",
-        "capabilities": ["reasoning", "planning"],
-        "license": "checkpoint license must be verified before install",
-        "requirements": "16–24 GB RAM or ~12–16 GB VRAM in Q4",
-    },
-    {
-        "id": "qwen2.5-coder-7b-instruct",
-        "display_name": "Qwen2.5-Coder-7B-Instruct",
-        "capabilities": ["coding", "reasoning"],
-        "license": "Apache-2.0",
-        "requirements": "16 GB RAM or ~8 GB VRAM in Q4",
-    },
-    {
-        "id": "qwen3-vl-8b-instruct",
-        "display_name": "Qwen3-VL-8B-Instruct",
-        "capabilities": ["vision", "ocr"],
-        "license": "Apache-2.0",
-        "requirements": "12–16 GB VRAM recommended",
-    },
-    {
-        "id": "bge-m3",
-        "display_name": "BGE-M3",
-        "capabilities": ["retrieval"],
-        "license": "MIT",
-        "requirements": "4–8 GB system RAM; GPU optional",
-    },
-    {
-        "id": "flux-1-schnell",
-        "display_name": "FLUX.1 [schnell]",
-        "capabilities": ["image"],
-        "license": "Apache-2.0",
-        "requirements": "~12 GB VRAM comfortable; CPU offload is slower",
-    },
-    {
-        "id": "wan2.1-t2v-1.3b",
-        "display_name": "Wan2.1-T2V-1.3B",
-        "capabilities": ["video"],
-        "license": "Apache-2.0",
-        "requirements": "~8.2 GB VRAM for 480p-class use",
-    },
-    {
-        "id": "whisper-turbo",
-        "display_name": "Whisper Turbo",
-        "capabilities": ["speech_to_text"],
-        "license": "MIT",
-        "requirements": "~6 GB VRAM; CPU supported but slower",
-    },
-    {
-        "id": "kokoro-82m",
-        "display_name": "Kokoro-82M",
-        "capabilities": ["text_to_speech"],
-        "license": "Apache-2.0",
-        "requirements": "CPU-capable; Ukrainian voice quality requires validation",
-    },
-    {
-        "id": "paddleocr",
-        "display_name": "PaddleOCR / PaddleOCR-VL",
-        "capabilities": ["ocr", "vision"],
-        "license": "Apache-2.0",
-        "requirements": "base OCR can run on CPU; VL path benefits from 8–12 GB VRAM",
-    },
-)
-
-
 def _registry() -> list[dict[str, Any]]:
     status = gateway.status()
     openai_status = openai_gateway.status()
+    local_status = local_gateway.status()
     live: list[dict[str, Any]] = [
         {
             "id": f"openai-{openai_status.model}",
@@ -134,20 +67,35 @@ def _registry() -> list[dict[str, Any]]:
             "requirements": "Botpress Runtime credential in ALTER Vault",
         }
     ]
-    local = [
-        {
+    installed = set(local_status.installed_models)
+    local: list[dict[str, Any]] = []
+    for item in LOCAL_MODEL_CATALOG:
+        installable = bool(item.get("runtime_ref"))
+        configured = item["id"] in installed
+        if configured:
+            install_state = "ready"
+        elif local_status.connected and installable:
+            install_state = "available_to_install"
+        elif local_status.configured and not local_status.connected and installable:
+            install_state = "runtime_unreachable"
+        elif not local_status.connected:
+            install_state = "requires_local_runtime"
+        elif not installable:
+            install_state = "backend_not_added"
+        else:
+            install_state = "requires_local_runtime"
+        local.append({
             **item,
-            "provider": "local",
-            "configured": False,
-            "credential_configured": False,
-            "action": "local-runtime-required",
+            "provider": local_status.provider,
+            "configured": configured,
+            "credential_configured": local_status.credential_configured,
+            "action": local_status.action if configured else "install-via-owner-runtime",
             "side_effects": False,
             "policy_boundary": "core-policy-required",
             "source": "local",
-            "install_state": "requires_local_runtime",
-        }
-        for item in _LOCAL_CATALOG
-    ]
+            "installable": installable,
+            "install_state": install_state,
+        })
     return [*live, *local]
 
 
@@ -160,11 +108,87 @@ def list_models(_principal: Principal = Depends(require_owner)) -> list[dict[str
 @router.get("/api/models/catalog")
 def model_catalog(_principal: Principal = Depends(require_owner)) -> dict[str, Any]:
     models = _registry()
+    local_status = local_gateway.status()
     return {
         "models": models,
         "configured": sum(1 for model in models if model["configured"]),
-        "local_runtime_connected": False,
+        "local_runtime_connected": local_status.connected,
+        "local_runtime": {
+            "configured": local_status.configured,
+            "connected": local_status.connected,
+            "installed": len(local_status.installed_models),
+            "active_jobs": local_status.active_jobs,
+            "selected_model": local_status.model,
+            "secret_exposed": False,
+        },
         "installation_policy": "hardware-license-check-sandbox-benchmark-owner-trust",
+    }
+
+
+@router.post("/models/{model_id}/install-request")
+@router.post("/api/models/{model_id}/install-request")
+def request_model_install(
+    model_id: str,
+    principal: Principal = Depends(require_owner),
+) -> dict[str, Any]:
+    if principal.actor_role != "owner":
+        raise HTTPException(status_code=403, detail="Only Owner can request a model installation")
+    model = get_local_model(model_id)
+    if model is None or not model.get("runtime_ref"):
+        raise HTTPException(status_code=404, detail="Model is not available through an approved ALTER runtime")
+    runtime = local_gateway.status()
+    if not runtime.connected:
+        raise HTTPException(status_code=503, detail="Connect an owner-controlled ALTER model runtime first")
+    if model_id in runtime.installed_models:
+        return {"already_installed": True, "model_id": model_id, "task": None}
+
+    task = orchestrator.create_task(
+        workspace_id=principal.workspace_id,
+        owner_user_id=principal.user_id,
+        objective=f"Install trusted local model {model['display_name']}",
+        acceptance_criteria=[
+            "Runtime accepts only the allowlisted immutable model reference.",
+            "Owner approval digest is recorded before download starts.",
+            "Installed model becomes visible in the live model registry.",
+        ],
+    )
+    try:
+        task = orchestrator.mark_ready(task.id)
+        task = orchestrator.request_action(
+            ActionRequest(
+                workspace_id=principal.workspace_id,
+                task_id=task.id,
+                category="model_install",
+                operation="pull_allowlisted_model",
+                risk=ActionRisk.REVERSIBLE,
+                target=model_id,
+                parameters={
+                    "runtime_ref": model["runtime_ref"],
+                    "license": model["license"],
+                    "requirements": model["requirements"],
+                },
+            ),
+            owner_rules=policy_store.list_for_workspace(principal.workspace_id),
+            owner_user_id=principal.user_id,
+        )
+    except InvalidTaskTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _audit(
+        principal,
+        event_type="model.install_requested",
+        task_id=task.id,
+        payload={
+            "model_id": model_id,
+            "runtime_backend": model["runtime_backend"],
+            "status": task.status.value,
+            "owner_approval_required": task.status == TaskStatus.AWAITING_APPROVAL,
+        },
+    )
+    return {
+        "already_installed": False,
+        "model_id": model_id,
+        "task": task.model_dump(mode="json"),
+        "owner_approval_required": task.status == TaskStatus.AWAITING_APPROVAL,
     }
 
 

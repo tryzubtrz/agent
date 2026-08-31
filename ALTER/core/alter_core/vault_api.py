@@ -8,7 +8,12 @@ from pydantic import BaseModel, Field
 
 from .api import _audit
 from .auth import Principal, require_owner
-from .vault_store import VaultUnavailableError, bootstrap_public_key, secret_configured, store_secret
+from .vault_store import (
+    VaultUnavailableError,
+    bootstrap_public_key,
+    secret_configured,
+    store_secret,
+)
 
 router = APIRouter()
 
@@ -17,10 +22,16 @@ _FIXED_ALIASES = {
     "vault:database": ("DATABASE_URL", "database", False),
     "vault:botpress_runtime": ("BOTPRESS_RUNTIME_TOKEN", "ai-runtime", True),
     "vault:openai_api": ("OPENAI_API_KEY", "openai-agents-sdk", True),
+    "vault:local_model_runtime": ("ALTER_MODEL_RUNTIME_TOKEN", "local-model-runtime", True),
     "vault:runway": ("RUNWAYML_API_SECRET", "media-generation", True),
     "vault:owner_web_pin": ("ALTER_WEB_PIN", "owner-auth", False),
 }
-_OWNER_WRITABLE = {"vault:botpress_runtime", "vault:openai_api", "vault:runway"}
+_OWNER_WRITABLE = {
+    "vault:botpress_runtime",
+    "vault:openai_api",
+    "vault:local_model_runtime",
+    "vault:runway",
+}
 
 
 class SecretWriteBody(BaseModel):

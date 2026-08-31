@@ -5,8 +5,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from .api import STORAGE_MODE, connector_store, task_store
+from .api import STORAGE_MODE, connector_store
 from .auth import Principal, require_owner
+from .local_model_gateway import LocalModelGateway
 from .reasoning_gateway import ReasoningGateway
 
 router = APIRouter()
@@ -35,6 +36,7 @@ def _capability(
 
 def _catalog(principal: Principal) -> list[dict[str, Any]]:
     agent = gateway.status()
+    local_runtime = LocalModelGateway().status()
     connectors: list[dict[str, Any]] = []
     if connector_store is not None:
         connectors = connector_store.list_for_workspace(principal.workspace_id)
@@ -44,6 +46,7 @@ def _catalog(principal: Principal) -> list[dict[str, Any]]:
         "DATABASE_URL",
         "BOTPRESS_RUNTIME_TOKEN",
         "OPENAI_API_KEY",
+        "ALTER_MODEL_RUNTIME_TOKEN",
         "ALTER_WEB_PIN",
     )
     vault_configured = sum(1 for name in vault_envs if os.getenv(name, "").strip())
@@ -55,7 +58,18 @@ def _catalog(principal: Principal) -> list[dict[str, Any]]:
         _capability(3, "browser", "Shared Chromium live session", "deferred", "Browser side-effect executor is intentionally not enabled.", "Provision isolated Chromium runtime, live-view and owner auth handoff."),
         _capability(4, "android", "Virtual Android / AVD", "deferred", "Android/ADB executor is intentionally not enabled.", "Provision isolated AVD host, ADB policy boundary and live stream."),
         _capability(5, "policy_menu", "Кімната правил", "ready", "Policy store, policy evaluation and owner UI are present."),
-        _capability(6, "model_install", "Автономне встановлення reasoning-моделей", "waiting", "Local model catalog exists, but no verified CPU/GPU runtime is connected.", "Connect model host and require hardware/license/sandbox/benchmark checks before trust."),
+        _capability(
+            6,
+            "model_install",
+            "Автономне встановлення reasoning-моделей",
+            "ready" if local_runtime.connected else "partial" if local_runtime.configured else "waiting",
+            (
+                f"Allowlisted runtime connected; {len(local_runtime.installed_models)} trusted model(s) installed."
+                if local_runtime.connected
+                else "Allowlisted installer and approval flow are deployed; owner model runtime is not connected."
+            ),
+            None if local_runtime.connected else "Run ALTER/model_runtime on the 16 GB host and configure its HTTPS URL + Vault token.",
+        ),
         _capability(7, "self_patching", "Self-Patching", "partial", "GitHub/Vercel delivery workflow exists, but ALTER does not yet own a general-purpose production coding executor.", "Bind a scoped GitHub coding executor with tests, checkpoint and deploy verification."),
         _capability(8, "connector_builder", "Автоматична розбудова конекторів", "partial", f"Connector gateway exists; {len(connectors)} connector records are currently visible to the workspace.", "Add connector scaffolder + OAuth/credential workflow generator behind approvals."),
         _capability(9, "vault", "Secrets Firewall & Vault aliases", "ready" if vault_configured >= 2 else "waiting", f"{vault_configured}/{len(vault_envs)} server-side aliases are configured; raw-secret exposure is forbidden."),
@@ -79,7 +93,7 @@ def _catalog(principal: Principal) -> list[dict[str, Any]]:
         _capability(27, "ocr", "OCR & document structuring", "partial", "Document pipeline exists and OCR candidates are catalogued; dedicated local OCR runtime is not verified."),
         _capability(28, "market", "Market Sandbox", "partial", "Market API is mounted; automatic install/test/trust lifecycle for arbitrary plugins is not complete."),
         _capability(29, "hard_stop", "Emergency Hard-Stop", "planned", "No global verified kill-switch endpoint currently owns all remote workers/sessions."),
-        _capability(30, "personalization", "Глибока персоналізація", "partial", "Persistent memory and owner context exist; automatic preference learning remains bounded and editable."),
+        _capability(30, "personalization", "Глибока персоналізація", "ready" if storage_ready else "degraded", "Owner-approved learning candidates, lessons, contextual triggers and editable preferences are injected into reasoning context."),
     ]
 
 

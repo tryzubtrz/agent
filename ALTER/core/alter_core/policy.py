@@ -4,7 +4,6 @@ from collections.abc import Iterable
 
 from .models import ActionRequest, ActionRisk, PolicyDecision, PolicyEffect, PolicyRule
 
-
 IMMUTABLE_DENY_CATEGORIES = {
     "bypass_authentication",
     "secret_exfiltration",
@@ -12,6 +11,11 @@ IMMUTABLE_DENY_CATEGORIES = {
     "cross_workspace_access",
     "malware",
     "destructive_operating_system_action",
+}
+
+MANDATORY_APPROVAL_CATEGORIES = {
+    "model_install",
+    "self_patch",
 }
 
 
@@ -43,6 +47,20 @@ class PolicyEngine:
             ),
             key=lambda rule: rule.priority,
         )
+
+        if matching_rules and matching_rules[0].effect == PolicyEffect.DENY:
+            rule = matching_rules[0]
+            return PolicyDecision(
+                effect=rule.effect,
+                reason=f"Matched owner Policy Menu rule: {rule.original_text}",
+                matched_rule_id=rule.id,
+            )
+
+        if action.category in MANDATORY_APPROVAL_CATEGORIES:
+            return PolicyDecision(
+                effect=PolicyEffect.REQUIRE_APPROVAL,
+                reason=f"{action.category} requires explicit Owner approval by safety policy.",
+            )
 
         if matching_rules:
             rule = matching_rules[0]

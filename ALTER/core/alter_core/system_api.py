@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 
 from .api import STORAGE_MODE, connector_store, task_store
 from .auth import Principal, require_owner
+from .local_model_gateway import LocalModelGateway
 from .models import TaskStatus
 from .reasoning_gateway import ReasoningGateway
 
@@ -32,11 +33,13 @@ def system_status(principal: Principal = Depends(require_owner)) -> dict[str, An
     connector_counts = Counter(str(item.get("status", "unknown")) for item in connectors)
 
     agent = gateway.status()
+    local_runtime = LocalModelGateway().status()
     vault_envs = (
         "ALTER_API_TOKEN",
         "DATABASE_URL",
         "BOTPRESS_RUNTIME_TOKEN",
         "OPENAI_API_KEY",
+        "ALTER_MODEL_RUNTIME_TOKEN",
         "ALTER_WEB_PIN",
     )
     vault_configured = sum(1 for name in vault_envs if os.getenv(name, "").strip())
@@ -93,8 +96,12 @@ def system_status(principal: Principal = Depends(require_owner)) -> dict[str, An
         {
             "key": "local_models",
             "label": "Local models",
-            "status": "waiting",
-            "detail": "Catalog ready; a separate owner-controlled GPU/CPU runtime is required",
+            "status": "ready" if local_runtime.connected else "partial" if local_runtime.configured else "waiting",
+            "detail": (
+                f"Runtime connected; installed: {', '.join(local_runtime.installed_models) or 'none'}"
+                if local_runtime.connected
+                else "Allowlisted runtime code is ready; an owner-controlled GPU/CPU host is required"
+            ),
         },
         {
             "key": "browser",
@@ -126,6 +133,13 @@ def system_status(principal: Principal = Depends(require_owner)) -> dict[str, An
             "action": agent.action,
             "model": agent.model,
             "available_providers": list(agent.available_providers),
+        },
+        "local_model_runtime": {
+            "configured": local_runtime.configured,
+            "connected": local_runtime.connected,
+            "installed_models": list(local_runtime.installed_models),
+            "selected_model": local_runtime.model,
+            "active_jobs": local_runtime.active_jobs,
         },
         "connectors": {
             "total": len(connectors),
