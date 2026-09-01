@@ -1,0 +1,48 @@
+name: ALTER Model Runtime Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ALTER/model_runtime/**'
+      - '.devcontainer/**'
+      - '.github/workflows/alter-model-runtime-check.yml'
+  pull_request:
+    paths:
+      - 'ALTER/model_runtime/**'
+      - '.devcontainer/**'
+      - '.github/workflows/alter-model-runtime-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install runtime
+        working-directory: ALTER/model_runtime
+        run: python -m pip install --upgrade pip && pip install -e '.[dev]'
+
+      - name: Runtime tests
+        working-directory: ALTER/model_runtime
+        run: pytest -q
+
+      - name: Shell syntax
+        run: bash -n .devcontainer/post-create.sh .devcontainer/post-start.sh ALTER/model_runtime/codespace-worker.sh
+
+      - name: Validate devcontainer JSON
+        run: python -m json.tool .devcontainer/devcontainer.json >/dev/null
+
+      - name: Validate Docker Compose
+        env:
+          ALTER_MODEL_RUNTIME_TOKEN: ci-only-placeholder-token-0000000000000000
+        run: docker compose --file ALTER/model_runtime/docker-compose.yml config --quiet

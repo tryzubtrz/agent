@@ -35,3 +35,24 @@ Recommended first model for a 16 GB Codespace: `qwen3-8b` (about 5.2 GB model
 download). `deepseek-r1:14b` is about 9 GB and will be much slower on CPU.
 
 Do not commit `.env`, Ollama data or downloaded weights.
+
+## GitHub Codespaces worker
+
+The repository dev container now provisions a 4-core / 16 GB / 32 GB ALTER
+worker and starts this runtime whenever the Codespace starts. It creates a
+local-only ignored credential when no Codespaces secret is configured; the
+credential value is never printed.
+
+```bash
+# Truthful container + model status
+bash ALTER/model_runtime/codespace-worker.sh status
+
+# Recommended first download (about 5.2 GB)
+bash ALTER/model_runtime/codespace-worker.sh install qwen3-8b --owner-approved
+
+# Show the stable Codespaces HTTPS endpoint without revealing its token
+bash ALTER/model_runtime/codespace-worker.sh connection
+```
+
+Port 8422 is private by default. Publishing it so the Vercel Core can call it
+is a separate owner-approved operation. See `ALTER/docs/CODESPACES_WORKER.md`.
