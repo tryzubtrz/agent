@@ -1,6 +1,6 @@
 {
   "name": "ALTER Digital Twin",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "image": "mcr.microsoft.com/devcontainers/base:bookworm",
   "hostRequirements": {
     "cpus": 4,
     "memory": "16gb",
