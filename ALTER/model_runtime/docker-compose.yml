@@ -2,21 +2,41 @@ services:
   ollama:
     image: ollama/ollama:0.33.1
     restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: 5m
+      OLLAMA_MAX_LOADED_MODELS: 1
+      OLLAMA_NUM_PARALLEL: 1
     volumes:
       - ollama-data:/root/.ollama
     ports:
       - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   alter-model-runtime:
     build: .
     restart: unless-stopped
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
       ALTER_MODEL_RUNTIME_TOKEN: ${ALTER_MODEL_RUNTIME_TOKEN:?Set ALTER_MODEL_RUNTIME_TOKEN in an untracked .env file}
+      PYTHONDONTWRITEBYTECODE: "1"
     ports:
       - "8422:8422"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
 volumes:
   ollama-data:

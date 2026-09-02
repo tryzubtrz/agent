@@ -14,6 +14,11 @@ The product source lives in `ALTER/`:
 - `ALTER/ios` — SwiftUI companion foundation
 - `ALTER/docs` — architecture and threat model
 
+GitHub Codespaces can now run ALTER's owner-controlled Ollama worker on a
+4-core / 16 GB machine. It is an on-demand reasoning node, while Vercel Core and
+PostgreSQL remain the durable control plane. Setup and honest lifecycle limits
+are documented in `ALTER/docs/CODESPACES_WORKER.md`.
+
 The useful code from `tryzubtrz/Agent-2` has been merged into this stronger
 Core architecture: confirmed learning candidates, lessons, contextual triggers,
 editable preferences, deterministic read-only grounding and an optional Deep

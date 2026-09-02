@@ -1,6 +1,11 @@
 {
   "name": "ALTER Digital Twin",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "16gb",
+    "storage": "32gb"
+  },
   "features": {
     "ghcr.io/devcontainers/features/python:1": {
       "version": "3.12"
@@ -8,9 +13,12 @@
     "ghcr.io/devcontainers/features/node:1": {
       "version": "22"
     },
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:4": {
+      "dockerDashComposeVersion": "v2"
+    }
   },
-  "forwardPorts": [3000, 8000],
+  "forwardPorts": [3000, 8000, 8422],
   "portsAttributes": {
     "3000": {
       "label": "ALTER Web",
@@ -19,9 +27,19 @@
     "8000": {
       "label": "ALTER Core",
       "onAutoForward": "notify"
+    },
+    "8422": {
+      "label": "ALTER Local Model Runtime (private by default)",
+      "onAutoForward": "silent"
     }
   },
-  "postCreateCommand": "python -m pip install -e 'ALTER/core[dev]' && cd ALTER/web && npm install --no-package-lock && cd ../botpress && npm install --no-package-lock",
+  "secrets": {
+    "ALTER_MODEL_RUNTIME_TOKEN": {
+      "description": "Long random bearer token shared only by ALTER Core and the owner-controlled model runtime. Never commit it."
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postStartCommand": "bash .devcontainer/post-start.sh",
   "customizations": {
     "vscode": {
       "extensions": [
